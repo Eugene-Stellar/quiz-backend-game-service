@@ -1,0 +1,65 @@
+#spring:
+#  datasource:
+#    url: ${DB_URL}
+#    username: ${DB_USER}
+#    password: ${DB_PASSWORD}
+#    driver-class-name: org.postgresql.Driver
+#
+#  jpa:
+#    database: postgresql
+#    show-sql: true
+#    hibernate:
+#      ddl-auto: none
+#    database-platform: org.hibernate.dialect.PostgreSQLDialect
+
+spring:
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USER}
+    password: ${DB_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      # Maximum number of connections in the pool.
+      # For a standard VPS (2-4 vCPU), 20-30 is usually optimal.
+      # Too high = CPU context switching overhead. Too low = threads waiting.
+      maximum-pool-size: 30
+
+      # Minimum number of idle connections to keep ready.
+      minimum-idle: 10
+
+      # How long (ms) a thread waits for a connection before throwing an error.
+      # 20 seconds is safer than the default 30s for high load to fail fast.
+      connection-timeout: 20000
+
+      # Maximum lifetime of a connection in the pool (30 minutes).
+      max-lifetime: 1800000
+
+      # Name for monitoring
+      pool-name: GameHikariPool
+
+  jpa:
+    database: postgresql
+    # CRITICAL: Disable printing SQL to console. This creates massive I/O overhead under load.
+    show-sql: false
+
+    # CRITICAL: Disable Open Session In View.
+    # When true (default), the DB connection is held open until the JSON is fully rendered.
+    # When false, the connection is returned to the pool immediately after the Service method finishes.
+    # This drastically improves throughput.
+    open-in-view: false
+
+    hibernate:
+      ddl-auto: validate # Checks if DB schema matches Java entities on startup. Use 'none' if you use Flyway/Liquibase.
+      naming:
+        physical-strategy: org.hibernate.boot.model.naming.PhysicalNamingStrategyStandardImpl
+
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        # Optimization: Group multiple INSERT/UPDATE statements into single network packets.
+        jdbc:
+          batch_size: 50
+          order_inserts: true
+          order_updates: true
+        # Disable formatting to save CPU cycles
+        format_sql: false
