@@ -12,7 +12,9 @@ import eugenestellar.backendgame.repository.QuestionRepo;
 import eugenestellar.backendgame.repository.UserInfoRepo;
 import jakarta.transaction.Transactional;
 
+import jakarta.validation.Valid;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.task.TaskRejectedException;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.TaskScheduler;
@@ -35,12 +37,14 @@ import java.util.concurrent.ScheduledFuture;
 public class GameService {
 
   private static final int MAX_PLAYERS = 4;
-  private static final int DEFAULT_QUESTION_QUANTITY = 2;
 
   private final SimpMessagingTemplate messagingTemplate;
   private final QuestionRepo questionRepo;
   private final GameRepo gameRepo;
   private final GamePlayerRepo gamePlayerRepo;
+
+  @Value("${CLOUD_FRONT_URL}")
+  private String imageUrlPart;
   private final UserInfoRepo userInfoRepo;
   private final Random random = new Random();
 
@@ -65,6 +69,7 @@ public class GameService {
 
   public void startGameAndQuestionPropagation(GameRoom room) {
 
+    // todo: specific topic
     // find random question Ids
     if (room.getQIds() == null || room.getQIds().isEmpty()) {
        List<Long> randomQIds = questionRepo.getRandomQuestionIds(room.getQQuantity());
@@ -102,6 +107,8 @@ public class GameService {
 
     room.setStatus(GameStatus.ACTIVE);
     room.setCurrentQId(q.getId());
+    room.setTopic(q.getTopic());
+    room.setCurrentImageUrl(imageUrlPart + q.getImagePath());
     room.setCurrentQText(q.getText());
     room.setCurrentAnswers(answers);
     room.setCurrentQNum(currentQNum);
@@ -120,60 +127,65 @@ public class GameService {
   @Transactional
   public void getRoundResults(GameRoom room) {
 
+    synchronized (room) {
+      if (room.getStatus() == GameStatus.FINISHED || room.getStatus() == GameStatus.ROUND_FINISHED) return;
 
+      if (room.getCurrentQNum() < room.getQQuantity()) {
+        Instant nextQ = ZonedDateTime.now().plusSeconds(15).toInstant();
 
-    Instant nextQ = ZonedDateTime.now().plusSeconds(15).toInstant();
+        room.setStatus(GameStatus.ROUND_FINISHED);
+        room.setRoundEndTime(Date.from(nextQ));
+        room.setCurrentTime(Date.from(ZonedDateTime.now().toInstant()));
 
-    room.setStatus(GameStatus.ROUND_FINISHED);
-    room.setRoundEndTime(Date.from(nextQ));
-    room.setCurrentTime(Date.from(ZonedDateTime.now().toInstant()));
+        sendUpdatedRoom(room);
+        room.setCurrentTime(null); // Очистка
 
-    sendUpdatedRoom(room);
-    room.setCurrentTime(null); // Очистка
-
-    for (Player p : room.getPlayers()) {
-      p.setIsAnswered(false);
-    }
-
-    // the end of the last round -> the end of the game
-    if (room.getCurrentQNum() >= room.getQQuantity()) {
-
-      // find max score
-      int maxScore = room.getPlayers().stream().
-          mapToInt(p -> p.getScore() == null ? 0 : p.getScore())
-          .max().orElse(0);
-
-      // get a list of players with max score (processing a draw)
-      List<Player> topPlayers = room.getPlayers().stream()
-          .filter(p -> (p.getScore() == null ? 0  : p.getScore()) == maxScore)
-          .toList();
-
-      // select the winner (it's random if there are a few topPlayers)
-      Player winner = topPlayers.isEmpty() ? null
-          : topPlayers.get(random.nextInt(topPlayers.size()));
-
-      Game game = new Game();
-      game.setDate(new Date());
-      game = gameRepo.save(game);
-      room.setGameId(game.getId());
-
-      for (Player p : room.getPlayers()) {
-        Long playerId = p.getId();
-        if (playerId == null) continue;
-        boolean isWinner = winner != null && p.getId().equals(winner.getId());
-        p.setIsWinner(isWinner);
-        saveUserInDb(p, game, isWinner);
+        for (Player p : room.getPlayers()) {
+          p.setIsAnswered(false);
+        }
+        taskScheduler.schedule(() -> startGameAndQuestionPropagation(room), nextQ);
       }
-      finishGame(room);
-    } else {
-      taskScheduler.schedule(() -> startGameAndQuestionPropagation(room), nextQ);
+      // the end of the last round -> the end of the game
+      else /* (room.getCurrentQNum() >= room.getQQuantity())*/ {
+
+        // find max score
+        int maxScore = room.getPlayers().stream().
+            mapToInt(p -> p.getScore() == null ? 0 : p.getScore())
+            .max().orElse(0);
+
+        // get a list of players with max score (processing a draw)
+        List<Player> topPlayers = room.getPlayers().stream()
+            .filter(p -> (p.getScore() == null ? 0  : p.getScore()) == maxScore)
+            .toList();
+
+        // select the winner (it's random if there are a few topPlayers)
+        Player winner = topPlayers.isEmpty() ? null
+            : topPlayers.get(random.nextInt(topPlayers.size()));
+
+        Game game = new Game();
+        game.setDate(new Date());
+        game = gameRepo.save(game);
+        room.setGameId(game.getId());
+
+        for (Player p : room.getPlayers()) {
+          Long playerId = p.getId();
+          if (playerId == null) continue;
+          boolean isWinner = winner != null && p.getId().equals(winner.getId());
+          p.setIsWinner(isWinner);
+          saveUserInDb(p, game, isWinner);
+        }
+        finishGame(room);
+      }
     }
+
   }
 
   @Transactional
   public void answerQ(Long qId, Long userId, Long answerId, String roomId) {
     GameRoom room = gameRooms.get(roomId);
     if (room == null) return;
+
+    boolean shouldFinishRound = false;
     
     synchronized (room) {
       Player currentPlayer = room.getPlayers().stream()
@@ -208,11 +220,13 @@ public class GameService {
       // cancellation of round timer and propagate results
       if (isAnsweredCount == room.getPlayers().size()) {
         removeTimer(roomId);
-        getRoundResults(room);
-        return;
+        shouldFinishRound = true;
+      } else {
+        sendUpdatedRoom(room);
       }
-      sendUpdatedRoom(room);
     }
+
+    if (shouldFinishRound) { getRoundResults(room); }
   }
 
 
@@ -333,7 +347,7 @@ public class GameService {
     ScheduledFuture<?> timer = timers.remove(roomId);
     // if there's a task cancel it i.e. cancel the timer
     if (timer != null) {
-      timer.cancel(false);
+      timer.cancel(true); // todo: recheck
     }
   }
 
@@ -554,14 +568,17 @@ public class GameService {
       // return topic (of this room) to this user and the list of players in the room
       return new GameRoomDto(gameTopic, modifyRoomJson(targetRoom));
     }
-    /* JOIN GameRoom or CREAT a default one */
+    /* JOIN AVAILABLE ROOM*/
+    // TODO: Topic искать комнату которая свободна и там ещё топик такой
+
+
+
     Optional<GameRoom> optionalGameRoom = findAvailableGameRoom();
-    // A Short way: GameRoom targetGameRoom = findAvailableGameRoom()
-    //    .orElseGet(this::createGameRoom);
     if (optionalGameRoom.isPresent()) {
       targetRoom = optionalGameRoom.get();
     } else {
-      targetRoom = createNewGameRoom(DEFAULT_QUESTION_QUANTITY);
+      return null;
+      // targetRoom = createNewGameRoom(DEFAULT_QUESTION_QUANTITY);
     }
     return processPlayerJoin(targetRoom, username, userId);
   }
@@ -614,32 +631,23 @@ public class GameService {
   }
 
   // creating a brand new GameRoom
-  public GameRoom createNewGameRoom(int qQuantity) {
+  public synchronized GameRoomDto createRoom(String username, Long userId, Integer qQuantity) {
+    Optional<GameRoom> room = findGameRoomByPlayerId(userId);
+    room.ifPresent(gameRoom -> leaveGameRoom(userId, gameRoom.getId()));
+
     String gameRoomId;
     do {
       gameRoomId = UUID.randomUUID().toString();
     }
     while (gameRooms.containsKey(gameRoomId));
 
-    GameRoom gameRoom = GameRoom.builder()
+    GameRoom newRoom = GameRoom.builder()
         .id(gameRoomId)
         .status(GameStatus.WAITING)
         .qQuantity(qQuantity)
         .players(new CopyOnWriteArrayList<>())
         .build();
-    gameRooms.put(gameRoomId, gameRoom);
-    return gameRoom;
-  }
-
-  public synchronized GameRoomDto createRoom(String username, Long userId, Integer qQuantity) {
-    Optional<GameRoom> room = findGameRoomByPlayerId(userId);
-
-    room.ifPresent(gameRoom -> leaveGameRoom(userId, gameRoom.getId()));
-
-    int finalQQuantity = (qQuantity == null || qQuantity < 5) ? DEFAULT_QUESTION_QUANTITY
-        : qQuantity;
-    GameRoom newRoom = createNewGameRoom(finalQQuantity);
-
+    gameRooms.put(gameRoomId, newRoom);
     return processPlayerJoin(newRoom, username, userId);
   }
 }
