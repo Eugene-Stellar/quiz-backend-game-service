@@ -1,21 +1,21 @@
-package eugenestellar.backendgame.service;
+package eugenestellar.service;
 
-import eugenestellar.backendgame.exception.ws.FrontendException;
-import eugenestellar.backendgame.model.GameStatus;
-import eugenestellar.backendgame.model.PlayerStatus;
-import eugenestellar.backendgame.model.dto.*;
-import eugenestellar.backendgame.model.entity.*;
-import eugenestellar.backendgame.model.gameEntity.GameRoom;
-import eugenestellar.backendgame.model.gameEntity.Player;
-import eugenestellar.backendgame.repository.GamePlayerRepo;
-import eugenestellar.backendgame.repository.GameRepo;
-import eugenestellar.backendgame.repository.QuestionRepo;
-import eugenestellar.backendgame.repository.UserInfoRepo;
+import eugenestellar.exception.ws.FrontendException;
+import eugenestellar.model.GameStatus;
+import eugenestellar.model.PlayerStatus;
+import eugenestellar.model.entity.*;
+import eugenestellar.model.dto.AnswerDto;
+import eugenestellar.model.dto.GameRoomDto;
+import eugenestellar.model.gameEntity.GameRoom;
+import eugenestellar.model.gameEntity.Player;
+import eugenestellar.repository.GamePlayerRepo;
+import eugenestellar.repository.GameRepo;
+import eugenestellar.repository.QuestionRepo;
+import eugenestellar.repository.UserInfoRepo;
 import jakarta.transaction.Transactional;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.core.task.TaskRejectedException;
@@ -42,8 +42,8 @@ public class GameService {
 
   // TIMING
   private static final int ROUND_TIME = 20;
-  private static final int ROUND_FINISHED = 5;
-  private static final int COUNTDOWN_TIME = 5;
+  private static final int ROUND_RESULTS_TIME = 5;
+  private static final int WAITING_COUNTDOWN_TIME = 5;
 
   private final SimpMessagingTemplate messagingTemplate;
   private final QuestionRepo questionRepo;
@@ -159,7 +159,7 @@ public class GameService {
     removeTimer(room.getId());
 
     if (room.getCurrentQNum() < room.getQQuantity()) {
-      Instant nextQ = ZonedDateTime.now().plusSeconds(ROUND_FINISHED).toInstant();
+      Instant nextQ = ZonedDateTime.now().plusSeconds(ROUND_RESULTS_TIME).toInstant();
 
       room.setStatus(GameStatus.ROUND_FINISHED);
       room.setRoundEndTime(Date.from(nextQ));
@@ -656,7 +656,7 @@ public class GameService {
         targetRoom.setStatus(GameStatus.COUNTDOWN);
 
         // timer propagation
-        Instant endTimeInst = ZonedDateTime.now().plusSeconds(COUNTDOWN_TIME).toInstant();
+        Instant endTimeInst = ZonedDateTime.now().plusSeconds(WAITING_COUNTDOWN_TIME).toInstant();
         Date endTime = Date.from(endTimeInst);
         targetRoom.setCountdownEndTime(endTime);
 
