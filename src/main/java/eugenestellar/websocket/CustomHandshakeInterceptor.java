@@ -34,19 +34,19 @@ public class CustomHandshakeInterceptor implements HandshakeInterceptor {
                                  WebSocketHandler wsHandler,
                                  Map<String, Object> attributes) throws Exception {
 
-
+    // extract token from headers just in case for compatability
     String valueOfHeader = request.getHeaders().getFirst("Authorization");
 
     if (valueOfHeader != null && valueOfHeader.startsWith("Bearer ")) {
       String token = valueOfHeader.substring(7);
-      return tokenValidationAndSetAttributes(token, response, attributes);
+      return validateTokenAndSetAttributes(token, response, attributes);
     }
     String query = request.getURI().getQuery();
     if (query != null && !query.isBlank()) {
       for (String param : query.split("&")) {
         if (param.startsWith("token=")) {
           String token = param.substring(6);
-          return tokenValidationAndSetAttributes(token, response, attributes);
+          return validateTokenAndSetAttributes(token, response, attributes);
         }
       }
     }
@@ -55,7 +55,7 @@ public class CustomHandshakeInterceptor implements HandshakeInterceptor {
     return false;
   }
 
-  private boolean tokenValidationAndSetAttributes(String token, ServerHttpResponse response, Map<String, Object> attributes) {
+  private boolean validateTokenAndSetAttributes(String token, ServerHttpResponse response, Map<String, Object> attributes) {
 
     try {
       DecodedJWT jwt = jwtUtil.jwtValidation(token);
