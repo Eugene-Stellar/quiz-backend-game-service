@@ -14,25 +14,24 @@ import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerCo
 public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
   private final CustomHandshakeInterceptor customHandshakeInterceptor;
+  private final String frontendUrl;
 
-  public WebSocketConfig(CustomHandshakeInterceptor customHandshakeInterceptor) {
+  public WebSocketConfig(CustomHandshakeInterceptor customHandshakeInterceptor, @Value("${FRONTEND_URL}")String frontendUrl) {
     this.customHandshakeInterceptor = customHandshakeInterceptor;
+    this.frontendUrl = frontendUrl;
   }
-
-  @Value("${FRONTEND_URL}")
-  private String frontendUrl;
 
   @Override
   public void configureMessageBroker(MessageBrokerRegistry registry) {
-    registry.enableSimpleBroker("/topic", "/queue"); // Префикс для маршрутов, на которые клиенты будут подписываться
-    registry.setApplicationDestinationPrefixes("/app"); // Префикс для маршрутов, по которым клиенты будут отправлять сообщения
+    registry.enableSimpleBroker("/topic", "/queue"); // /topic for broadcasting, /queue for private messaging
+    registry.setApplicationDestinationPrefixes("/app");
   }
 
   @Override
   public void registerStompEndpoints(StompEndpointRegistry registry) {
     registry.addEndpoint("/ws-game")
         .addInterceptors(customHandshakeInterceptor)
-        .setHandshakeHandler(new CustomHandshakeHandler())
+        .setHandshakeHandler(new CustomHandshakeHandler()) // is used to set custom Principal and tie WebSocket session with user
         .setAllowedOrigins(frontendUrl);
   }
 }

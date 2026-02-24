@@ -1,8 +1,8 @@
 package eugenestellar.websocket;
 
-
 import java.security.Principal;
 
+// ties ws session with user, it allows to work private messaging (/queue)
 public class StompPrincipal implements Principal {
   private final String name;
 
