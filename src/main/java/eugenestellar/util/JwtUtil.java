@@ -13,8 +13,11 @@ import java.util.List;
 @Component
 public class JwtUtil {
 
-  @Value("${SECRET_WORD}")
-  private String secretWord;
+  private final String secretWord;
+
+  public JwtUtil(@Value("${SECRET_WORD}") String secretWord) {
+    this.secretWord = secretWord;
+  }
 
   public DecodedJWT jwtValidation(String token) throws JWTVerificationException {
 
