@@ -16,8 +16,8 @@ public class GamePlayer {
   @Column(name = "score", nullable = false)
   private int gameScore;
 
-  @Column(nullable = false)
-  private boolean status;
+  @Column(name = "status", nullable = false)
+  private boolean status; // isWinner
 
   @ManyToOne
   @MapsId("userId") // copy ID from the object userInfo to id.userId
