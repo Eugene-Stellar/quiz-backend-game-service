@@ -25,8 +25,6 @@ public class GameRoom {
 
   private Date countdownEndTime; // null if there's no timer
 
-  @Min(value = 5, message = "Minimum 5 questions")
-  @Max(value = 15, message = "Maximum 15 questions")
   @JsonProperty("qQuantity")
   private Integer qQuantity;
 

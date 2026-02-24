@@ -15,9 +15,10 @@ public class Player {
   private PlayerStatus status;
 
   private Integer score;
-  private Boolean isAnswered;// = false;
+  private Boolean isAnswered;
+
   @JsonProperty("isCorrect")
-  private Boolean isCurrentAnsCorrect;// = false;
+  private Boolean isCurrentAnsCorrect;
 
   private Boolean isWinner;
 }
