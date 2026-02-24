@@ -1,7 +1,7 @@
-package eugenestellar.backendgame.controller;
+package eugenestellar.controller;
 
-import eugenestellar.backendgame.config.UserPrincipal;
-import eugenestellar.backendgame.service.GameService;
+import eugenestellar.config.UserPrincipal;
+import eugenestellar.service.GameService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -24,7 +24,7 @@ public class GameRestController {
   @GetMapping("/my_status")
   public ResponseEntity<Map<String, String>> getPlayerStatus(@AuthenticationPrincipal UserPrincipal user) {
 
-    String userStatus = gameService.getPlayerState(user.getId());
+    String userStatus = gameService.getPlayerState(user.id());
     return ResponseEntity.ok().body(Map.of("status", userStatus));
   }
 
@@ -32,8 +32,8 @@ public class GameRestController {
   public ResponseEntity<List<String>> getAllTopics() {
 
     List<String> topics = gameService.findAllTopics();
-
     topics.add("random");
+
     return ResponseEntity.ok().body(topics);
   }
 }
