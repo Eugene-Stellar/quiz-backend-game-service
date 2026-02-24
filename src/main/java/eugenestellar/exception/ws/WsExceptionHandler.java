@@ -1,21 +1,21 @@
 package eugenestellar.exception.ws;
 
 import jakarta.validation.ConstraintViolationException;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.messaging.handler.annotation.MessageExceptionHandler;
 import org.springframework.messaging.simp.annotation.SendToUser;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 
 import java.util.Map;
 
+@Slf4j
 @ControllerAdvice
 public class WsExceptionHandler {
 
   @MessageExceptionHandler(ConstraintViolationException.class)
   @SendToUser("/queue/errors")
   public Map<String, String> handleValidationException(ConstraintViolationException ex) {
-
     String msg = ex.getConstraintViolations().iterator().next().getMessage();
-
     return Map.of("error", msg);
   }
 
@@ -25,10 +25,10 @@ public class WsExceptionHandler {
     return Map.of("error", ex.getMessage());
   }
 
-//  @MessageExceptionHandler(RuntimeException.class)
-//  @SendToUser("/queue/errors")
-//  public Map<String, String> handleRuntimeException(RuntimeException ex) {
-//    return Map.of("error", ex.getMessage());
-//  }
-
+  @MessageExceptionHandler(RuntimeException.class)
+  @SendToUser("/queue/errors")
+  public Map<String, String> handleRuntimeException(RuntimeException ex) {
+    log.error("Unexpected error in WS", ex);
+    return Map.of("error", "Unexpected server error. Please try again later.");
+  }
 }
