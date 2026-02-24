@@ -15,9 +15,9 @@ public class SchedulerConfig {
 
     ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
 
-    // Pool size: 300 threads, it's enough to process a plenty
-    // of rooms, since timerExpired() executes swiftly
-    scheduler.setPoolSize(300);
+    // Pool size (defines how many scheduled tasks can run concurrently): 100 threads,
+    // it's enough to process a plenty of rooms, since timerExpired() executes swiftly
+    scheduler.setPoolSize(100); //
 
     scheduler.setThreadNamePrefix("GameTimer-"); // for debugging
     scheduler.initialize();
