@@ -1,16 +1,8 @@
 package eugenestellar.config;
 
-import lombok.AllArgsConstructor;
-import lombok.Getter;
-
 import java.security.Principal;
 
-@Getter
-@AllArgsConstructor
-public class UserPrincipal implements Principal {
-
-  private Long id;
-  private String username;
+public record UserPrincipal(Long id, String username) implements Principal {
 
   @Override
   public String getName() {
