@@ -12,6 +12,7 @@ import eugenestellar.repository.GamePlayerRepo;
 import eugenestellar.repository.GameRepo;
 import eugenestellar.repository.QuestionRepo;
 import eugenestellar.repository.UserInfoRepo;
+import eugenestellar.model.dto.mapper.GameMapper;
 import jakarta.transaction.Transactional;
 
 import lombok.extern.slf4j.Slf4j;
@@ -29,6 +30,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ScheduledFuture;
+
 
 // TODO: установить время для соединения (удалять через 1-2 часа), то есть рвать соединение
 @Slf4j
@@ -141,7 +143,7 @@ public class GameService {
   // happens when round's countdown is finished or all players answered in advance
   public void getRoundResults(GameRoom room) {
 
-    // FIXME: нужна ли эта проверка
+    // just in case: if it's not active then it's pointless to get results
     if (room.getStatus() != GameStatus.ACTIVE) return;
 
     // remove Round Time if users answered ahead of schedule
@@ -222,7 +224,7 @@ public class GameService {
           .findFirst()
           .orElseThrow(() -> new RuntimeException("Player with id: " + userId + " not found in room"));
 
-      if (currentPlayer == null || currentPlayer.getIsAnswered()) return;
+      if (currentPlayer.getIsAnswered()) return;
 
       Question q = questionRepo.findById(qId)
           .orElseThrow(() -> new RuntimeException("Question not found with id: " + qId));
@@ -264,95 +266,12 @@ public class GameService {
   // --------------------------------------------------------------------------------------------------------------------
 
   private void sendUpdatedRoom(GameRoom room) {
-    GameRoom modifiedRoomJson = modifyRoomJson(room);
+    GameRoomDto gameRoomDto = GameMapper.toDto(room);
     String gameTopic = "/topic/game_room/" + room.getId();
-    messagingTemplate.convertAndSend(gameTopic, modifiedRoomJson);
+    messagingTemplate.convertAndSend(gameTopic, gameRoomDto);
   }
 
-  private GameRoom modifyRoomJson(GameRoom room) {
-    GameRoom.GameRoomBuilder builder = room.toBuilder();
 
-    Date timeStamp = (room.getCurrentTime() == null) ? Date.from(ZonedDateTime.now().toInstant())
-      : room.getCurrentTime();
-    List<Player> players = new ArrayList<>();
-    List<Player> playersSnapshot = new ArrayList<>(room.getPlayers()); // protection from in-time changed Player List
-    switch (room.getStatus()) {
-      case WAITING:
-        for (Player p : playersSnapshot) {
-          players.add(p.toBuilder()
-              .isAnswered(null)
-              .isCurrentAnsCorrect(null)
-              .isWinner(null)
-              .score(null)
-              .build());
-        }
-        builder.currentTime(null).gameId(null).players(players);
-        break;
-      case COUNTDOWN:
-        builder
-          .currentTime(timeStamp)
-          .currentQText(null)
-          .currentQId(null)
-          .currentAnswers(null)
-          .currentQNum(null)
-          .qQuantity(null)
-          .gameId(null)
-          .roundEndTime(null).players(players);
-        for (Player p : playersSnapshot) {
-          players.add(p.toBuilder()
-              .isAnswered(null)
-              .isCurrentAnsCorrect(null)
-              .isWinner(null)
-              .score(null)
-              .build());
-        } break;
-      case ACTIVE:
-        builder
-            .currentTime(timeStamp)
-            .countdownEndTime(null).players(players).gameId(null);
-        for (Player p : playersSnapshot) {
-          int realScore = (p.getScore() == null) ? 0 : p.getScore();
-          boolean isCorrect = Boolean.TRUE.equals(p.getIsCurrentAnsCorrect());
-          players.add(p.toBuilder()
-            .isCurrentAnsCorrect(null)
-            .isWinner(null)
-            .score(isCorrect ? realScore - 10 : realScore)
-            .build());
-          }
-        break;
-      case ROUND_FINISHED:
-        builder.countdownEndTime(null).currentAnswers(null).currentQId(null).currentQText(null).qQuantity(null);
-        builder.currentTime(timeStamp);
-        for (Player p : playersSnapshot) {
-          players.add(p.toBuilder()
-              .isAnswered(null)
-              .isWinner(null)
-              .build());
-        }
-        builder.gameId(null).players(players).roundEndTime(room.getRoundEndTime());
-        break;
-      case FINISHED:
-        for (Player p : playersSnapshot) {
-          players.add(p.toBuilder()
-              .isAnswered(null)
-              .status(null)
-              .isCurrentAnsCorrect(null)
-              .build());
-        }
-        builder
-          .currentQText(null)
-          .currentQId(null)
-          .currentAnswers(null)
-          .currentQNum(null)
-          .qQuantity(null)
-          .roundEndTime(null)
-          .countdownEndTime(null)
-          .players(players)
-          .roundEndTime(null); break;
-    }
-    builder.qIds(null);
-    return builder.build();
-  }
 
   private void finishGame(GameRoom room) {
     String roomId = room.getId();
@@ -599,8 +518,11 @@ public class GameService {
       sendUpdatedRoom(targetRoom);
       String gameTopic = "/topic/game_room/" + targetRoom.getId();
 
+      GameRoomDto gameRoomDto = GameMapper.toDto(targetRoom);
+      gameRoomDto.setGameRoomTopic(gameTopic);
+
       // return topic (of this room) to this user and the list of players in the room
-      return new GameRoomDto(gameTopic, modifyRoomJson(targetRoom));
+      return gameRoomDto;
     }
     /* JOIN AVAILABLE ROOM */
     Optional<GameRoom> optionalGameRoom = findAvailableGameRoom(qTopic);
@@ -669,13 +591,18 @@ public class GameService {
 
         // start game & send the 1st question
         startGameAndPropagateQuestions(targetRoom);
-        return new GameRoomDto(gameTopic, modifyRoomJson(targetRoom));
+
+        GameRoomDto gameRoomDto = GameMapper.toDto(targetRoom);
+        gameRoomDto.setGameRoomTopic(gameTopic);
+        return gameRoomDto;
       }
 
       // sending to all players an updated list of players
       sendUpdatedRoom(targetRoom);
       // send topic (of this room) to client so that he could subscribe on it
-      return new GameRoomDto(gameTopic, modifyRoomJson(targetRoom));
+      GameRoomDto gameRoomDto = GameMapper.toDto(targetRoom);
+      gameRoomDto.setGameRoomTopic(gameTopic);
+      return gameRoomDto;
   }
 
   private void expireTimer(GameRoom room) {
