@@ -3,82 +3,64 @@ package eugenestellar.service;
 import eugenestellar.exception.ws.FrontendException;
 import eugenestellar.model.GameStatus;
 import eugenestellar.model.PlayerStatus;
+import eugenestellar.model.dto.GameRoomResponse;
 import eugenestellar.model.entity.*;
 import eugenestellar.model.dto.AnswerDto;
-import eugenestellar.model.dto.GameRoomDto;
 import eugenestellar.model.gameEntity.GameRoom;
 import eugenestellar.model.gameEntity.Player;
-import eugenestellar.repository.GamePlayerRepo;
-import eugenestellar.repository.GameRepo;
 import eugenestellar.repository.QuestionRepo;
-import eugenestellar.repository.UserInfoRepo;
 import eugenestellar.model.dto.mapper.GameMapper;
-import jakarta.transaction.Transactional;
 
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.core.task.TaskRejectedException;
-import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.time.ZonedDateTime;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ScheduledFuture;
-
 
 // TODO: установить время для соединения (удалять через 1-2 часа), то есть рвать соединение
 @Slf4j
 @Service
 public class GameService {
 
-  @Autowired @Lazy
-  private GameService self;
-
   // TIMING
   private static final int ROUND_TIME = 20;
   private static final int ROUND_RESULTS_TIME = 5;
   private static final int WAITING_COUNTDOWN_TIME = 5;
 
-  private static final int MAX_PLAYERS = 4;
+  public static final int MAX_PLAYERS = 4;
 
-  private final SimpMessagingTemplate messagingTemplate;
+
   private final QuestionRepo questionRepo;
-  private final GameRepo gameRepo;
-  private final GamePlayerRepo gamePlayerRepo;
-  private final UserInfoRepo userInfoRepo;
+  private final GameDbService gameDbService;
+  private final GameRoomManager gameRoomManager;
+  private final GameNotificationService notificationService;
 
   private final String imageUrlPart;
   private final Random random = new Random();
   private final TaskScheduler taskScheduler;
 
-  // timers, ScheduledFuture<?> is a reference to method(e.g. expiredTimer()) i.e.
-  // expiredTimer() executes only when it's time to do so
-  private final Map<String, ScheduledFuture<?>> timers = new ConcurrentHashMap<>();
-  private final Map<String, GameRoom> gameRooms = new ConcurrentHashMap<>();
 
-  public GameService(GamePlayerRepo gamePlayerRepo,
-                     SimpMessagingTemplate messagingTemplate,
+  public GameService(GameNotificationService notificationService,
                      QuestionRepo questionRepo,
-                     GameRepo gameRepo, UserInfoRepo userInfoRepo,
                      TaskScheduler taskScheduler,
-                     @Value("${CLOUD_FRONT_URL}") String imageUrlPart) {
-    this.gamePlayerRepo = gamePlayerRepo;
-    this.messagingTemplate = messagingTemplate;
+                     @Value("${CLOUD_FRONT_URL}") String imageUrlPart,
+                     GameDbService gameDbService,
+                     GameRoomManager gameRoomManager) {
+    this.notificationService = notificationService;
     this.questionRepo = questionRepo;
-    this.gameRepo = gameRepo;
-    this.userInfoRepo = userInfoRepo;
     this.taskScheduler = taskScheduler;
     this.imageUrlPart = imageUrlPart;
+    this.gameDbService = gameDbService;
+    this.gameRoomManager = gameRoomManager;
   }
 
   private void startGameAndPropagateQuestions(GameRoom room) {
-
 
     synchronized (room) {
       if (room.getStatus() != GameStatus.ROUND_FINISHED && room.getStatus() != GameStatus.COUNTDOWN) return;
@@ -129,14 +111,14 @@ public class GameService {
       room.setCurrentAnswers(answers);
       room.setCurrentQNum(currentQNum);
 
-      sendUpdatedRoom(room);
+      notificationService.sendUpdatedRoom(room);
 
       // update CurrentTime as null after sending room
       room.setCurrentTime(null);
 
       // get Round Results once ROUND_TIME is finished
       ScheduledFuture<?> roundTask = taskScheduler.schedule(() -> getRoundResults(room), roundEnd);
-      timers.put(room.getId(), roundTask);
+      gameRoomManager.addTimer(room.getId(), roundTask);
     }
   }
 
@@ -147,7 +129,7 @@ public class GameService {
     if (room.getStatus() != GameStatus.ACTIVE) return;
 
     // remove Round Time if users answered ahead of schedule
-    removeTimer(room.getId());
+    gameRoomManager.removeTimer(room.getId());
 
     // if current question isn't the last one then set timer to send new question
     if (room.getCurrentQNum() < room.getQQuantity()) {
@@ -156,7 +138,7 @@ public class GameService {
       room.setStatus(GameStatus.ROUND_FINISHED);
       room.setRoundEndTime(Date.from(nextQ));
       room.setCurrentTime(Date.from(ZonedDateTime.now().toInstant()));
-      sendUpdatedRoom(room);
+      notificationService.sendUpdatedRoom(room);
 
       // update CurrentTime as null after sending room
       room.setCurrentTime(null);
@@ -168,7 +150,7 @@ public class GameService {
 
       // set timer for ROUND_RESULTS_TIME to start next round (i.e. propagate questions)
       ScheduledFuture<?> nextRoundTask = taskScheduler.schedule(() -> startGameAndPropagateQuestions(room), nextQ);
-      timers.put(room.getId(), nextRoundTask);
+      gameRoomManager.addTimer(room.getId(), nextRoundTask);
     }
     // the end of the last round -> the end of the game
     else {
@@ -191,29 +173,13 @@ public class GameService {
         p.setIsWinner(isWinner);
       }
 
-      self.saveFinalResultsToDb(room);
+      gameDbService.saveFinalResultsToDb(room);
       finishGame(room);
     }
   }
 
-  @Transactional
-  public void saveFinalResultsToDb(GameRoom room) {
-    Game game = new Game();
-    game.setDate(new Date());
-    game = gameRepo.save(game);
-    room.setGameId(game.getId());
-
-    // save every user in db
-    for (Player p : room.getPlayers()) {
-      Long playerId = p.getId();
-      if (playerId == null) continue;
-      saveUserToDb(p, game, p.getIsWinner());
-    }
-  }
-
-  @Transactional
   public void answerQ(Long qId, Long userId, Long answerId, String roomId) {
-    GameRoom room = gameRooms.get(roomId);
+    GameRoom room = gameRoomManager.getRoom(roomId);
     if (room == null) return;
 
     boolean shouldFinishRound = false;
@@ -250,14 +216,11 @@ public class GameService {
 
       // cancellation of round timer and propagate results
       if (isAnsweredCount == room.getPlayers().size()) {
-        removeTimer(roomId);
-        //
-        // room.setStatus(GameStatus.ROUND_FINISHED); // ← добавьте эту строку
-        //
+        gameRoomManager.removeTimer(roomId);
         shouldFinishRound = true;
 
       } else {
-        sendUpdatedRoom(room);
+        notificationService.sendUpdatedRoom(room);
       }
     }
     if (shouldFinishRound) { getRoundResults(room); }
@@ -265,61 +228,24 @@ public class GameService {
 
   // --------------------------------------------------------------------------------------------------------------------
 
-  private void sendUpdatedRoom(GameRoom room) {
-    GameRoomDto gameRoomDto = GameMapper.toDto(room);
-    String gameTopic = "/topic/game_room/" + room.getId();
-    messagingTemplate.convertAndSend(gameTopic, gameRoomDto);
-  }
-
 
 
   private void finishGame(GameRoom room) {
     String roomId = room.getId();
 
-    removeTimer(roomId);
+    gameRoomManager.removeTimer(roomId);
     room.setStatus(GameStatus.FINISHED);
-    sendUpdatedRoom(room);
+    notificationService.sendUpdatedRoom(room);
 
     Instant deleteTime = ZonedDateTime.now().plusSeconds(3).toInstant(); // todo: recheck, make a log that room was deleted successfully
     taskScheduler.schedule(() ->
-        gameRooms.remove(roomId), Date.from(deleteTime));
-  }
-
-  public void saveUserToDb(Player p, Game game, boolean isWinner) {
-
-    Long playerId = p.getId();
-    UserInfo userInfo = userInfoRepo.findById(p.getId()).orElseThrow(()
-        -> new RuntimeException("There is no user with id = " + playerId));
-
-    // update UserInfo and GamePlayers
-    userInfo.setGameQuantity(userInfo.getGameQuantity() + 1);
-    if (p.getScore() != null)
-      userInfo.setTotalScore(userInfo.getTotalScore() + p.getScore());
-
-    GamePlayer gamePlayer = new GamePlayer();
-    gamePlayer.setId(new GamePlayerComposedId(playerId, game.getId()));
-    if (p.getScore() != null)
-      gamePlayer.setGameScore(p.getScore());
-
-    if (isWinner) {
-      userInfo.setWins(userInfo.getWins() + 1);
-    } else {
-      userInfo.setLosses(userInfo.getLosses() + 1);
-    }
-    userInfoRepo.save(userInfo);
-
-    gamePlayer.setGame(game);
-    gamePlayer.setUserInfo(userInfo);
-    gamePlayer.setStatus(isWinner);
-
-    gamePlayerRepo.save(gamePlayer);
+        gameRoomManager.removeRoom(roomId), Date.from(deleteTime));
   }
 
   // DELETE user from game room
-  @Transactional
   public synchronized void leaveGameRoom(Long userId, String roomId) {
 
-    GameRoom room = gameRooms.get(roomId);
+    GameRoom room = gameRoomManager.getRoom(roomId);
     if (room == null) {return;}
 
     // FIXME: надо ли это уловие вообще, если комната закончена и игрок уходит, тогда я выгоняю
@@ -335,14 +261,9 @@ public class GameService {
     // TECHNICAL WIN if one player is remained in active room
     if (room.getPlayers().size() == 1 && (room.getStatus() == GameStatus.ACTIVE || room.getStatus() == GameStatus.ROUND_FINISHED)) {
       Player winner = room.getPlayers().getFirst();
-
-      Game game = new Game();
-      game.setDate(new Date());
-      game = gameRepo.save(game);
-      room.setGameId(game.getId());
       winner.setIsWinner(true);
 
-      saveUserToDb(winner, game,true);
+      gameDbService.technicalWin(winner, room);
       finishGame(room);
       return;
     }
@@ -351,26 +272,26 @@ public class GameService {
     if (room.getPlayers().isEmpty()) {
       // remove timers if it has status COUNTDOWN // TODO: по идее я должен в любом случае удалять таймеры на всякий случай
       if (room.getStatus() == GameStatus.COUNTDOWN) {
-        removeTimer(roomId);
+        gameRoomManager.removeTimer(roomId);
       }
-      gameRooms.remove(roomId);
+      gameRoomManager.removeRoom(roomId);
       return;
     }
     // change status of room if there's 1 player and
     // status of the room is COUNTDOWN // TODO: возможно порядок условий надо поменять
     if (room.getPlayers().size() < 2 &&
         room.getStatus() == GameStatus.COUNTDOWN) {
-      removeTimer(roomId);
+      gameRoomManager.removeTimer(roomId);
       room.setCountdownEndTime(null);
       room.setStatus(GameStatus.WAITING);
     }
-    sendUpdatedRoom(room);
+    notificationService.sendUpdatedRoom(room);
   }
 
   // --------------------------------------------------------------------------------------------------------------------
 
   private void deleteRoomIfAllDisconnected(String roomId) {
-    GameRoom room = gameRooms.get(roomId);
+    GameRoom room = gameRoomManager.getRoom(roomId);
     if (room == null) { return; } // if already deleted
 
     boolean hasConnectedPlayer = room.getPlayers().stream()
@@ -379,8 +300,8 @@ public class GameService {
     // if there's one connected user then game continues otherwise
     // all users are disconnected then room and timer are deleted
     if (!hasConnectedPlayer) {
-      gameRooms.remove(roomId);
-      removeTimer(roomId);
+      gameRoomManager.removeRoom(roomId);
+      gameRoomManager.removeTimer(roomId); // todo это наверное лишнее если я удаляю таймер в мэнеджере
       log.info("GameRoom {} deleted due to inactivity", roomId);
     }
     // TODO: тут мб return надо сделать на случай если законекченные есть но мб это по дефолту и так
@@ -388,7 +309,7 @@ public class GameService {
 
   // case of disconnection (i.e. closed a tab or browser)
   public synchronized void disconnectGameRoom(Long userId) {
-    Optional<GameRoom> roomOpt = findGameRoomByPlayerId(userId);
+    Optional<GameRoom> roomOpt = gameRoomManager.findGameRoomByPlayerId(userId);
 
     if (roomOpt.isPresent()) {
       GameRoom room = roomOpt.get();
@@ -397,7 +318,7 @@ public class GameService {
       if (room.getStatus() == GameStatus.FINISHED) {
         room.getPlayers().removeIf(p -> p.getId().equals(userId));
         if (room.getPlayers().isEmpty()) {
-          gameRooms.remove(room.getId());
+          gameRoomManager.removeRoom(room.getId());
         }
         return;
       }
@@ -418,8 +339,8 @@ public class GameService {
         // if room is empty then delete it // todo: удалить выше дублируется логика if FINISHED
         if (room.getPlayers().isEmpty()) {
           String roomId = room.getId();
-          removeTimer(room.getId());
-          gameRooms.remove(roomId);
+          gameRoomManager.removeTimer(room.getId());  // todo это наверное лишнее если я удаляю таймер в мэнеджере
+          gameRoomManager.removeRoom(roomId);
         }
       }
 
@@ -430,7 +351,7 @@ public class GameService {
       // if there's only one player and RoomStatus is COUNTDOWN then status changes to WAITING and remove timer
       String roomId = room.getId();
       if (connectedPlayersCount < 2 && room.getStatus() == GameStatus.COUNTDOWN) {
-        removeTimer(roomId);
+        gameRoomManager.removeTimer(roomId);
         room.setCountdownEndTime(null);
         room.setStatus(GameStatus.WAITING);
       }
@@ -444,7 +365,7 @@ public class GameService {
           log.debug("Server is shutting down, scheduled deletion of the room {} cancelled", roomId);
         }
       }
-      sendUpdatedRoom(room);
+      notificationService.sendUpdatedRoom(room);
     }
     // TODO: тут мб return надо сделать на случай если законекченные есть но мб это по дефолту и так в воид методе
   }
@@ -459,9 +380,15 @@ public class GameService {
     return topics;
   }
 
-  // метод для получения статуса игрока, чтобы понять переводить его в меню или в игру закидывать
+  private void validateTopic(String qTopic) {
+    if (!questionRepo.existsByTopic(qTopic)) {
+      throw new FrontendException("Topic " + qTopic  + " not found");
+    }
+  }
+
+  // метод для получения статуса игрока, чтобы понять переводить его в меню или в игру закидывать // todo: можно в отдельный класс закинуть
   public String getPlayerState(Long userId) {
-    Optional<GameRoom> gameRoomOpt = findGameRoomByPlayerId(userId);
+    Optional<GameRoom> gameRoomOpt = gameRoomManager.findGameRoomByPlayerId(userId);
     if (gameRoomOpt.isEmpty()) {
       return PlayerStatus.NOT_IN_GAME.toString();
     }
@@ -479,23 +406,7 @@ public class GameService {
     return PlayerStatus.NOT_IN_GAME.toString();
   }
 
-  private Optional<GameRoom> findAvailableGameRoom(String qTopic) {
-    boolean isRandom = "random".equals(qTopic);
-
-    for (GameRoom gameRoom : gameRooms.values()) {
-      boolean specifyTopic = isRandom || gameRoom.getTopic().equals(qTopic);
-
-      if ((gameRoom.getStatus() == GameStatus.WAITING ||
-          gameRoom.getStatus() == GameStatus.COUNTDOWN) &&
-          gameRoom.getPlayers().size() < MAX_PLAYERS &&
-          specifyTopic) {
-        return Optional.of(gameRoom);
-      }
-    }
-    return Optional.empty();
-  }
-
-  public synchronized GameRoomDto joinGameRoom(String username, Long userId, String qTopic) {
+  public synchronized GameRoomResponse joinGameRoom(String username, Long userId, String qTopic, int qQuantity) {
     // checking whether any room contains user or not,
     // if yes then reconnect happens i.e. return the user in that room and change its status on CONNECTED.
     // if user does not belong any room, then user is placed in available room with
@@ -504,7 +415,7 @@ public class GameService {
       validateTopic(qTopic);
     GameRoom targetRoom;
     // RECONNECT
-    Optional<GameRoom> existingGameRoomOpt = findGameRoomByPlayerId(userId);
+    Optional<GameRoom> existingGameRoomOpt = gameRoomManager.findGameRoomByPlayerId(userId);
     if (existingGameRoomOpt.isPresent()) {
       targetRoom = existingGameRoomOpt.get();
       for (Player p : targetRoom.getPlayers()) {
@@ -515,45 +426,23 @@ public class GameService {
       }
 
       // sending to all players an updated list of players
-      sendUpdatedRoom(targetRoom);
+      notificationService.sendUpdatedRoom(targetRoom);
       String gameTopic = "/topic/game_room/" + targetRoom.getId();
 
-      GameRoomDto gameRoomDto = GameMapper.toDto(targetRoom);
-      gameRoomDto.setGameRoomTopic(gameTopic);
-
       // return topic (of this room) to this user and the list of players in the room
-      return gameRoomDto;
+      return new GameRoomResponse(gameTopic, GameMapper.toDto(targetRoom));
     }
     /* JOIN AVAILABLE ROOM */
-    Optional<GameRoom> optionalGameRoom = findAvailableGameRoom(qTopic);
+    Optional<GameRoom> optionalGameRoom = gameRoomManager.findAvailableGameRoom(qTopic, qQuantity);
     if (optionalGameRoom.isPresent()) {
       targetRoom = optionalGameRoom.get();
     } else {
-      // TODO: создавать дефолтную комнату topic = random, qQuantity = 3
-      //  return: createRoom(username, userId, 3, random)
-      return null;
+      return createRoom(username, userId, qQuantity, qTopic);
     }
     return processPlayerJoin(targetRoom, username, userId);
   }
 
-  private Optional<GameRoom> findGameRoomByPlayerId(long userId) {
-    for (GameRoom gameRoom : gameRooms.values()) {
-      for (Player player : gameRoom.getPlayers()) {
-        if (player.getId().equals(userId)) {
-          return Optional.of(gameRoom);
-        }
-      }
-    }
-    return Optional.empty();
-  }
-
-  private void validateTopic(String qTopic) {
-    if (!questionRepo.existsByTopic(qTopic)) {
-      throw new FrontendException("Topic " + qTopic  + " not found");
-    }
-  }
-
-  private GameRoomDto processPlayerJoin(GameRoom targetRoom, String username, Long userId) {
+  private GameRoomResponse processPlayerJoin(GameRoom targetRoom, String username, Long userId) {
 
       Player playerToRoom = Player.builder()
           .username(username)
@@ -578,52 +467,40 @@ public class GameService {
 
         // schedule timer deletion
         ScheduledFuture<?> timerTask = taskScheduler
-            .schedule(() -> expireTimer(targetRoom), endTimeInst);
+            .schedule(() -> expireWaitingCountdown(targetRoom), endTimeInst);
 
-        timers.put(targetRoom.getId(), timerTask);
+        gameRoomManager.addTimer(targetRoom.getId(), timerTask);
       }
 
       String gameTopic = "/topic/game_room/" + targetRoom.getId();
       // 4 connected players -> countdown finished & start game
       if (connectedPlayersCount == MAX_PLAYERS) {
-        removeTimer(targetRoom.getId());
+        gameRoomManager.removeTimer(targetRoom.getId());
         targetRoom.setCountdownEndTime(null);
 
         // start game & send the 1st question
         startGameAndPropagateQuestions(targetRoom);
 
-        GameRoomDto gameRoomDto = GameMapper.toDto(targetRoom);
-        gameRoomDto.setGameRoomTopic(gameTopic);
-        return gameRoomDto;
+        return new GameRoomResponse(gameTopic, GameMapper.toDto(targetRoom));
       }
 
       // sending to all players an updated list of players
-      sendUpdatedRoom(targetRoom);
+      notificationService.sendUpdatedRoom(targetRoom);
       // send topic (of this room) to client so that he could subscribe on it
-      GameRoomDto gameRoomDto = GameMapper.toDto(targetRoom);
-      gameRoomDto.setGameRoomTopic(gameTopic);
-      return gameRoomDto;
+        return new GameRoomResponse(gameTopic, GameMapper.toDto(targetRoom));
   }
 
-  private void expireTimer(GameRoom room) {
+  private void expireWaitingCountdown(GameRoom room) {
     // status changes from COUNTDOWN to ACTIVE, when waiting countdown time is finished
     if (room != null && room.getStatus() == GameStatus.COUNTDOWN) {
-      timers.remove(room.getId());
+      gameRoomManager.removeTimer(room.getId());
       room.setCountdownEndTime(null);
       startGameAndPropagateQuestions(room);
     }
   }
 
-  private void removeTimer(String roomId) {
-    ScheduledFuture<?> timer = timers.remove(roomId);
-    // if there's a task cancel it i.e. cancel the timer
-    if (timer != null) {
-      timer.cancel(true);
-    }
-  }
-
   // creating a brand new GameRoom
-  public synchronized GameRoomDto createRoom(String username, Long userId, Integer qQuantity, String qTopic) {
+  private synchronized GameRoomResponse createRoom(String username, Long userId, Integer qQuantity, String qTopic) {
     if (qTopic.equals("random")) {
       List<String> topics = findAllTopics();
       qTopic = topics.get(random.nextInt(topics.size()));
@@ -632,14 +509,14 @@ public class GameService {
     }
 
     // check is there user in any room if yes then delete him from that room
-    Optional<GameRoom> room = findGameRoomByPlayerId(userId);
+    Optional<GameRoom> room = gameRoomManager.findGameRoomByPlayerId(userId);
     room.ifPresent(gameRoom -> leaveGameRoom(userId, gameRoom.getId()));
 
     String gameRoomId;
     do {
       gameRoomId = UUID.randomUUID().toString();
     }
-    while (gameRooms.containsKey(gameRoomId));
+    while (gameRoomManager.containsRoomWithId(gameRoomId));
 
     GameRoom newRoom = GameRoom.builder()
         .id(gameRoomId)
@@ -648,7 +525,7 @@ public class GameService {
         .players(new CopyOnWriteArrayList<>())
         .topic(qTopic)
         .build();
-    gameRooms.put(gameRoomId, newRoom);
+    gameRoomManager.addRoom(newRoom);
     return processPlayerJoin(newRoom, username, userId);
   }
 }
