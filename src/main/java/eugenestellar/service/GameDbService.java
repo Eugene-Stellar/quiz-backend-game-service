@@ -29,23 +29,16 @@ public class GameDbService {
 
   @Transactional
   public void saveFinalResultsToDb(GameRoom room) {
-    Game game = new Game();
-    game.setDate(new Date());
-    game = gameRepo.save(game);
-    room.setGameId(game.getId());
-
+    Game game = createAndSaveGame(room);
     // save every user in db
     for (Player p : room.getPlayers()) {
-      Long playerId = p.getId();
-      if (playerId == null) continue;
       saveUserToDb(p, game, p.getIsWinner());
     }
   }
 
-  @Transactional
-  public void saveUserToDb(Player p, Game game, boolean isWinner) {
-
+  private void saveUserToDb(Player p, Game game, boolean isWinner) {
     Long playerId = p.getId();
+    if (playerId == null) return;
     UserInfo userInfo = userInfoRepo.findById(p.getId()).orElseThrow(()
         -> new RuntimeException("There is no user with id = " + playerId));
 
@@ -75,11 +68,16 @@ public class GameDbService {
 
   @Transactional
   public void technicalWin(Player winner, GameRoom room) {
+    Game game = createAndSaveGame(room);
+    saveUserToDb(winner, game,true);
+  }
+
+  private Game createAndSaveGame (GameRoom room) {
     Game game = new Game();
     game.setDate(new Date());
     game = gameRepo.save(game);
     room.setGameId(game.getId());
 
-    saveUserToDb(winner, game,true);
+    return game;
   }
 }
