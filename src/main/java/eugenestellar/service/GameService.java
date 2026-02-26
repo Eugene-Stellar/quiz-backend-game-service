@@ -32,7 +32,7 @@ public class GameService {
   public static final int MAX_PLAYERS = 4;
 
   private final GameRoundService gameRoundService;
-  private final QuestionRepo questionRepo;
+  private final QuestionService questionService;
   private final GameDbService gameDbService;
   private final GameRoomManager gameRoomManager;
   private final GameNotificationService notificationService;
@@ -42,18 +42,163 @@ public class GameService {
 
 
   public GameService(GameNotificationService notificationService,
-                     QuestionRepo questionRepo,
+                     QuestionService questionService,
                      TaskScheduler taskScheduler,
                      GameRoundService gameRoundService,
                      GameDbService gameDbService,
                      GameRoomManager gameRoomManager) {
     this.notificationService = notificationService;
-    this.questionRepo = questionRepo;
     this.taskScheduler = taskScheduler;
     this.gameDbService = gameDbService;
     this.gameRoomManager = gameRoomManager;
     this.gameRoundService = gameRoundService;
+    this.questionService = questionService;
   }
+
+
+  // метод для получения статуса игрока, чтобы понять переводить его в меню или в игру закидывать // todo: можно в отдельный класс закинуть
+  public String getPlayerState(Long userId) {
+    Optional<GameRoom> gameRoomOpt = gameRoomManager.findGameRoomByPlayerId(userId);
+    if (gameRoomOpt.isEmpty()) {
+      return PlayerStatus.NOT_IN_GAME.toString();
+    }
+
+    if (gameRoomOpt.get().getStatus() == GameStatus.FINISHED) {
+      return PlayerStatus.NOT_IN_GAME.toString();
+    }
+
+    for (Player player : gameRoomOpt.get().getPlayers()) {
+      if (player.getId().equals(userId)) {
+        return player.getStatus().toString();
+      }
+    }
+    // just in case
+    return PlayerStatus.NOT_IN_GAME.toString();
+  }
+
+  public synchronized GameRoomResponse joinGameRoom(String username, Long userId, String qTopic, int qQuantity) {
+    // checking whether any room contains user or not,
+    // if yes then reconnect happens i.e. return the user in that room and change its status on CONNECTED.
+    // if user does not belong any room, then user is placed in available room with
+
+    if (!"random".equals(qTopic))
+      questionService.validateTopic(qTopic);
+    GameRoom targetRoom;
+    // RECONNECT
+    Optional<GameRoom> existingGameRoomOpt = gameRoomManager.findGameRoomByPlayerId(userId);
+    if (existingGameRoomOpt.isPresent()) {
+      targetRoom = existingGameRoomOpt.get();
+      for (Player p : targetRoom.getPlayers()) {
+        if (p.getId().equals(userId)) {
+          p.setStatus(PlayerStatus.CONNECTED);
+          break;
+        }
+      }
+
+      // sending to all players an updated list of players
+      notificationService.sendUpdatedRoom(targetRoom);
+      String gameTopic = "/topic/game_room/" + targetRoom.getId();
+
+      // return topic (of this room) to this user and the list of players in the room
+      return new GameRoomResponse(gameTopic, GameMapper.toDto(targetRoom));
+    }
+    /* JOIN AVAILABLE ROOM */
+    Optional<GameRoom> optionalGameRoom = gameRoomManager.findAvailableGameRoom(qTopic, qQuantity);
+    if (optionalGameRoom.isPresent()) {
+      targetRoom = optionalGameRoom.get();
+    } else {
+      return createRoom(username, userId, qQuantity, qTopic);
+    }
+    return processPlayerJoin(targetRoom, username, userId);
+  }
+
+  private GameRoomResponse processPlayerJoin(GameRoom targetRoom, String username, Long userId) {
+
+    Player playerToRoom = Player.builder()
+        .username(username)
+        .id(userId)
+        .status(PlayerStatus.CONNECTED)
+        .score(0)
+        .isAnswered(false)
+        .build();
+    targetRoom.getPlayers().add(playerToRoom);
+
+    long connectedPlayersCount = targetRoom.getPlayers().stream()
+        .filter(p -> p.getStatus() == PlayerStatus.CONNECTED)
+        .count();
+
+    // 2 connected players -> start timer
+    if (connectedPlayersCount >= 2 && targetRoom.getStatus() == GameStatus.WAITING) {
+      targetRoom.setStatus(GameStatus.COUNTDOWN);
+
+      Instant endTimeInst = ZonedDateTime.now().plusSeconds(WAITING_COUNTDOWN_TIME).toInstant();
+      Date endTime = Date.from(endTimeInst);
+      targetRoom.setCountdownEndTime(endTime);
+
+      // schedule timer deletion
+      ScheduledFuture<?> timerTask = taskScheduler
+          .schedule(() -> expireWaitingCountdown(targetRoom), endTimeInst);
+
+      gameRoomManager.addTimer(targetRoom.getId(), timerTask);
+    }
+
+    String gameTopic = "/topic/game_room/" + targetRoom.getId();
+    // 4 connected players -> countdown finished & start game
+    if (connectedPlayersCount == MAX_PLAYERS) {
+      gameRoomManager.removeTimer(targetRoom.getId());
+      targetRoom.setCountdownEndTime(null);
+
+      // start game & send the 1st question
+      gameRoundService.startGameAndPropagateQuestions(targetRoom);
+
+      return new GameRoomResponse(gameTopic, GameMapper.toDto(targetRoom));
+    }
+
+    // sending to all players an updated list of players
+    notificationService.sendUpdatedRoom(targetRoom);
+    // send topic (of this room) to client so that he could subscribe on it
+    return new GameRoomResponse(gameTopic, GameMapper.toDto(targetRoom));
+  }
+
+  private void expireWaitingCountdown(GameRoom room) {
+    // status changes from COUNTDOWN to ACTIVE, when waiting countdown time is finished
+    if (room != null && room.getStatus() == GameStatus.COUNTDOWN) {
+      gameRoomManager.removeTimer(room.getId());
+      room.setCountdownEndTime(null);
+      gameRoundService.startGameAndPropagateQuestions(room);
+    }
+  }
+
+  // creating a brand new GameRoom
+  private synchronized GameRoomResponse createRoom(String username, Long userId, Integer qQuantity, String qTopic) {
+    if (qTopic.equals("random")) {
+      List<String> topics = questionService.findAllTopics();
+      qTopic = topics.get(random.nextInt(topics.size()));
+    } else {
+      questionService.validateTopic(qTopic);
+    }
+
+    // check is there user in any room if yes then delete him from that room
+    Optional<GameRoom> room = gameRoomManager.findGameRoomByPlayerId(userId);
+    room.ifPresent(gameRoom -> leaveGameRoom(userId, gameRoom.getId()));
+
+    String gameRoomId;
+    do {
+      gameRoomId = UUID.randomUUID().toString();
+    }
+    while (gameRoomManager.containsRoomWithId(gameRoomId));
+
+    GameRoom newRoom = GameRoom.builder()
+        .id(gameRoomId)
+        .status(GameStatus.WAITING)
+        .qQuantity(qQuantity)
+        .players(new CopyOnWriteArrayList<>())
+        .topic(qTopic)
+        .build();
+    gameRoomManager.addRoom(newRoom);
+    return processPlayerJoin(newRoom, username, userId);
+  }
+
 
   // DELETE user from game room
   public synchronized void leaveGameRoom(Long userId, String roomId) {
@@ -181,160 +326,4 @@ public class GameService {
     // TODO: тут мб return надо сделать на случай если законекченные есть но мб это по дефолту и так в воид методе
   }
 
-  public List<String> findAllTopics() {
-    List<String> topics = questionRepo.findAllTopics();
-    if (topics.isEmpty()) {
-      throw new RuntimeException("No Topics in Db");
-    }
-    return topics;
-  }
-
-  private void validateTopic(String qTopic) {
-    if (!questionRepo.existsByTopic(qTopic)) {
-      throw new FrontendException("Topic " + qTopic  + " not found");
-    }
-  }
-
-  // метод для получения статуса игрока, чтобы понять переводить его в меню или в игру закидывать // todo: можно в отдельный класс закинуть
-  public String getPlayerState(Long userId) {
-    Optional<GameRoom> gameRoomOpt = gameRoomManager.findGameRoomByPlayerId(userId);
-    if (gameRoomOpt.isEmpty()) {
-      return PlayerStatus.NOT_IN_GAME.toString();
-    }
-
-    if (gameRoomOpt.get().getStatus() == GameStatus.FINISHED) {
-      return PlayerStatus.NOT_IN_GAME.toString();
-    }
-
-    for (Player player : gameRoomOpt.get().getPlayers()) {
-      if (player.getId().equals(userId)) {
-        return player.getStatus().toString();
-      }
-    }
-    // just in case
-    return PlayerStatus.NOT_IN_GAME.toString();
-  }
-
-  public synchronized GameRoomResponse joinGameRoom(String username, Long userId, String qTopic, int qQuantity) {
-    // checking whether any room contains user or not,
-    // if yes then reconnect happens i.e. return the user in that room and change its status on CONNECTED.
-    // if user does not belong any room, then user is placed in available room with
-
-    if (!"random".equals(qTopic))
-      validateTopic(qTopic);
-    GameRoom targetRoom;
-    // RECONNECT
-    Optional<GameRoom> existingGameRoomOpt = gameRoomManager.findGameRoomByPlayerId(userId);
-    if (existingGameRoomOpt.isPresent()) {
-      targetRoom = existingGameRoomOpt.get();
-      for (Player p : targetRoom.getPlayers()) {
-        if (p.getId().equals(userId)) {
-          p.setStatus(PlayerStatus.CONNECTED);
-          break;
-        }
-      }
-
-      // sending to all players an updated list of players
-      notificationService.sendUpdatedRoom(targetRoom);
-      String gameTopic = "/topic/game_room/" + targetRoom.getId();
-
-      // return topic (of this room) to this user and the list of players in the room
-      return new GameRoomResponse(gameTopic, GameMapper.toDto(targetRoom));
-    }
-    /* JOIN AVAILABLE ROOM */
-    Optional<GameRoom> optionalGameRoom = gameRoomManager.findAvailableGameRoom(qTopic, qQuantity);
-    if (optionalGameRoom.isPresent()) {
-      targetRoom = optionalGameRoom.get();
-    } else {
-      return createRoom(username, userId, qQuantity, qTopic);
-    }
-    return processPlayerJoin(targetRoom, username, userId);
-  }
-
-  private GameRoomResponse processPlayerJoin(GameRoom targetRoom, String username, Long userId) {
-
-      Player playerToRoom = Player.builder()
-          .username(username)
-          .id(userId)
-          .status(PlayerStatus.CONNECTED)
-          .score(0)
-          .isAnswered(false)
-          .build();
-      targetRoom.getPlayers().add(playerToRoom);
-
-      long connectedPlayersCount = targetRoom.getPlayers().stream()
-          .filter(p -> p.getStatus() == PlayerStatus.CONNECTED)
-          .count();
-
-      // 2 connected players -> start timer
-      if (connectedPlayersCount >= 2 && targetRoom.getStatus() == GameStatus.WAITING) {
-        targetRoom.setStatus(GameStatus.COUNTDOWN);
-
-        Instant endTimeInst = ZonedDateTime.now().plusSeconds(WAITING_COUNTDOWN_TIME).toInstant();
-        Date endTime = Date.from(endTimeInst);
-        targetRoom.setCountdownEndTime(endTime);
-
-        // schedule timer deletion
-        ScheduledFuture<?> timerTask = taskScheduler
-            .schedule(() -> expireWaitingCountdown(targetRoom), endTimeInst);
-
-        gameRoomManager.addTimer(targetRoom.getId(), timerTask);
-      }
-
-      String gameTopic = "/topic/game_room/" + targetRoom.getId();
-      // 4 connected players -> countdown finished & start game
-      if (connectedPlayersCount == MAX_PLAYERS) {
-        gameRoomManager.removeTimer(targetRoom.getId());
-        targetRoom.setCountdownEndTime(null);
-
-        // start game & send the 1st question
-        gameRoundService.startGameAndPropagateQuestions(targetRoom);
-
-        return new GameRoomResponse(gameTopic, GameMapper.toDto(targetRoom));
-      }
-
-      // sending to all players an updated list of players
-      notificationService.sendUpdatedRoom(targetRoom);
-      // send topic (of this room) to client so that he could subscribe on it
-        return new GameRoomResponse(gameTopic, GameMapper.toDto(targetRoom));
-  }
-
-  private void expireWaitingCountdown(GameRoom room) {
-    // status changes from COUNTDOWN to ACTIVE, when waiting countdown time is finished
-    if (room != null && room.getStatus() == GameStatus.COUNTDOWN) {
-      gameRoomManager.removeTimer(room.getId());
-      room.setCountdownEndTime(null);
-      gameRoundService.startGameAndPropagateQuestions(room);
-    }
-  }
-
-  // creating a brand new GameRoom
-  private synchronized GameRoomResponse createRoom(String username, Long userId, Integer qQuantity, String qTopic) {
-    if (qTopic.equals("random")) {
-      List<String> topics = findAllTopics();
-      qTopic = topics.get(random.nextInt(topics.size()));
-    } else {
-      validateTopic(qTopic);
-    }
-
-    // check is there user in any room if yes then delete him from that room
-    Optional<GameRoom> room = gameRoomManager.findGameRoomByPlayerId(userId);
-    room.ifPresent(gameRoom -> leaveGameRoom(userId, gameRoom.getId()));
-
-    String gameRoomId;
-    do {
-      gameRoomId = UUID.randomUUID().toString();
-    }
-    while (gameRoomManager.containsRoomWithId(gameRoomId));
-
-    GameRoom newRoom = GameRoom.builder()
-        .id(gameRoomId)
-        .status(GameStatus.WAITING)
-        .qQuantity(qQuantity)
-        .players(new CopyOnWriteArrayList<>())
-        .topic(qTopic)
-        .build();
-    gameRoomManager.addRoom(newRoom);
-    return processPlayerJoin(newRoom, username, userId);
-  }
 }
