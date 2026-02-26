@@ -24,6 +24,7 @@ public class JwtUtil {
     JWTVerifier jwtVerifier = JWT
         .require(Algorithm.HMAC256(secretWord))
         .withIssuer("auth-service")
+        .acceptLeeway(60)
         .build();
 
     return jwtVerifier.verify(token);
