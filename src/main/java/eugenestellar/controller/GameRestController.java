@@ -2,6 +2,7 @@ package eugenestellar.controller;
 
 import eugenestellar.config.UserPrincipal;
 import eugenestellar.service.GameService;
+import eugenestellar.service.QuestionService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -16,9 +17,11 @@ import java.util.Map;
 public class GameRestController {
 
   private final GameService gameService;
+  private final QuestionService questionService;
 
-  public GameRestController(GameService gameService) {
+  public GameRestController(GameService gameService, QuestionService questionService) {
     this.gameService = gameService;
+    this.questionService = questionService;
   }
 
   @GetMapping("/my_status")
@@ -31,7 +34,7 @@ public class GameRestController {
   @GetMapping("/topics")
   public ResponseEntity<List<String>> getAllTopics() {
 
-    List<String> topics = gameService.findAllTopics();
+    List<String> topics = questionService.findAllTopics();
     topics.add("random");
 
     return ResponseEntity.ok().body(topics);
