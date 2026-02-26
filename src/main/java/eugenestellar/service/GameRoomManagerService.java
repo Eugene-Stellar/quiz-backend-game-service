@@ -3,6 +3,7 @@ package eugenestellar.service;
 import eugenestellar.model.GameStatus;
 import eugenestellar.model.gameEntity.GameRoom;
 import eugenestellar.model.gameEntity.Player;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -12,8 +13,9 @@ import java.util.concurrent.ScheduledFuture;
 
 import static eugenestellar.service.GameService.MAX_PLAYERS;
 
+@Slf4j
 @Component
-public class GameRoomManager {
+public class GameRoomManagerService {
 
   // timers, ScheduledFuture<?> is a reference to method(e.g. expiredTimer()) i.e.
   // expiredTimer() executes only when it's time to do so
@@ -31,6 +33,7 @@ public class GameRoomManager {
   public void removeRoom (String roomId) {
     gameRooms.remove(roomId);
     removeTimer(roomId);
+    log.info("Room with id: {} was deleted successfully.", roomId);
   }
 
   public boolean containsRoomWithId(String roomId ) {
