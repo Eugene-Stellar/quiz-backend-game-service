@@ -28,7 +28,7 @@ public class GameRoundService {
   private final String imageUrlPart;
 
   private final QuestionRepo questionRepo;
-  private final GameRoomManager gameRoomManager;
+  private final GameRoomManagerService gameRoomManager;
   private final GameNotificationService notificationService;
   private final GameDbService gameDbService;
   private final TaskScheduler taskScheduler;
@@ -37,7 +37,7 @@ public class GameRoundService {
   public GameRoundService(GameDbService gameDbService,
                           @Value("${CLOUD_FRONT_URL}") String imageUrlPart,
                           QuestionRepo questionRepo,
-                          GameRoomManager gameRoomManager,
+                          GameRoomManagerService gameRoomManager,
                           GameNotificationService notificationService,
                           TaskScheduler taskScheduler) {
     this.gameDbService = gameDbService;
@@ -48,7 +48,6 @@ public class GameRoundService {
     this.taskScheduler = taskScheduler;
   }
 
-
   public void finishGame(GameRoom room) {
     String roomId = room.getId();
 
@@ -56,9 +55,9 @@ public class GameRoundService {
     room.setStatus(GameStatus.FINISHED);
     notificationService.sendUpdatedRoom(room);
 
-    Instant deleteTime = ZonedDateTime.now().plusSeconds(3).toInstant(); // todo: recheck, make a log that room was deleted successfully
+    Instant deleteTime = ZonedDateTime.now().plusSeconds(3).toInstant();
     taskScheduler.schedule(() ->
-        gameRoomManager.removeRoom(roomId), Date.from(deleteTime));
+        gameRoomManager.removeRoom(roomId), deleteTime);
   }
 
   public void startGameAndPropagateQuestions(GameRoom room) {
@@ -71,7 +70,7 @@ public class GameRoundService {
         List<Long> randomQIds = questionRepo.getRandomQuestionIds(room.getQQuantity(), room.getTopic());
         if (randomQIds.isEmpty())
           throw new RuntimeException("No questions in DB");
-        room.setQIds(new ArrayList<>(randomQIds)); // FIXME: надо ли это поле вообще в GameRoom
+        room.setQIds(new ArrayList<>(randomQIds)); // ensure random set of questions during the game
       }
 
       int currentQNum = (room.getCurrentQNum() == null || room.getCurrentQNum() == 0) ? 1
@@ -83,10 +82,10 @@ public class GameRoundService {
         return;
       }
 
-      // find next question and its answers // FIXME: это текущий вопрос или следующий
-      Long nextQId = room.getQIds().get(currentQNum - 1);
-      Question q = questionRepo.findById(nextQId)
-          .orElseThrow(() -> new RuntimeException("Question not found with id: " + nextQId));
+      // find next (current) question and its answers
+      Long currentQId = room.getQIds().get(currentQNum - 1);
+      Question q = questionRepo.findById(currentQId)
+          .orElseThrow(() -> new RuntimeException("Question not found with id: " + currentQId));
       // set answers
       List<AnswerDto> answers = new ArrayList<>();
       for (Answer ans : q.getAnswers()) {
@@ -94,7 +93,9 @@ public class GameRoundService {
       }
 
       Date current = Date.from(ZonedDateTime.now().toInstant());
-      Date roundEnd = Date.from(ZonedDateTime.now().plusSeconds(ROUND_TIME).toInstant());
+
+      Instant roundEnd = ZonedDateTime.now().plusSeconds(ROUND_TIME).toInstant();
+
 
       for (Player p : room.getPlayers()) {
         p.setIsAnswered(false);
@@ -102,7 +103,7 @@ public class GameRoundService {
       }
 
       room.setCurrentTime(current);
-      room.setRoundEndTime(roundEnd);
+      room.setRoundEndTime(Date.from(roundEnd));
 
       room.setStatus(GameStatus.ACTIVE);
       room.setCurrentQId(q.getId());
@@ -129,53 +130,55 @@ public class GameRoundService {
     // just in case: if it's not active then it's pointless to get results
     if (room.getStatus() != GameStatus.ACTIVE) return;
 
-    // remove Round Time if users answered ahead of schedule
-    gameRoomManager.removeTimer(room.getId());
+    synchronized (room) {
+      // remove Round Time if users answered ahead of schedule
+      gameRoomManager.removeTimer(room.getId());
 
-    // if current question isn't the last one then set timer to send new question
-    if (room.getCurrentQNum() < room.getQQuantity()) {
-      Instant nextQ = ZonedDateTime.now().plusSeconds(ROUND_RESULTS_TIME).toInstant();
+      // if current question isn't the last one then set timer to send new question
+      if (room.getCurrentQNum() < room.getQQuantity()) {
+        Instant nextQ = ZonedDateTime.now().plusSeconds(ROUND_RESULTS_TIME).toInstant();
 
-      room.setStatus(GameStatus.ROUND_FINISHED);
-      room.setRoundEndTime(Date.from(nextQ));
-      room.setCurrentTime(Date.from(ZonedDateTime.now().toInstant()));
-      notificationService.sendUpdatedRoom(room);
+        room.setStatus(GameStatus.ROUND_FINISHED);
+        room.setRoundEndTime(Date.from(nextQ));
+        room.setCurrentTime(Date.from(ZonedDateTime.now().toInstant()));
+        notificationService.sendUpdatedRoom(room);
 
-      // update CurrentTime as null after sending room
-      room.setCurrentTime(null);
+        // update CurrentTime as null after sending room
+        room.setCurrentTime(null);
 
-      // update isAnswered for every player
-      for (Player p : room.getPlayers()) {
-        p.setIsAnswered(false);
+        // update isAnswered for every player
+        for (Player p : room.getPlayers()) {
+          p.setIsAnswered(false);
+        }
+
+        // set timer for ROUND_RESULTS_TIME to start next round (i.e. propagate questions)
+        ScheduledFuture<?> nextRoundTask = taskScheduler.schedule(() -> startGameAndPropagateQuestions(room), nextQ);
+        gameRoomManager.addTimer(room.getId(), nextRoundTask);
       }
+      // the end of the last round -> the end of the game
+      else {
+        // find max score
+        int maxScore = room.getPlayers().stream().
+            mapToInt(p -> p.getScore() == null ? 0 : p.getScore())
+            .max().orElse(0);
 
-      // set timer for ROUND_RESULTS_TIME to start next round (i.e. propagate questions)
-      ScheduledFuture<?> nextRoundTask = taskScheduler.schedule(() -> startGameAndPropagateQuestions(room), nextQ);
-      gameRoomManager.addTimer(room.getId(), nextRoundTask);
-    }
-    // the end of the last round -> the end of the game
-    else {
-      // find max score
-      int maxScore = room.getPlayers().stream().
-          mapToInt(p -> p.getScore() == null ? 0 : p.getScore())
-          .max().orElse(0);
+        // get a list of players with max score (processing a draw)
+        List<Player> topPlayers = room.getPlayers().stream()
+            .filter(p -> (p.getScore() == null ? 0  : p.getScore()) == maxScore)
+            .toList();
 
-      // get a list of players with max score (processing a draw)
-      List<Player> topPlayers = room.getPlayers().stream()
-          .filter(p -> (p.getScore() == null ? 0  : p.getScore()) == maxScore)
-          .toList();
+        // select the winner (it's random if there are a few topPlayers)
+        Player winner = topPlayers.isEmpty() ? null
+            : topPlayers.get(random.nextInt(topPlayers.size()));
 
-      // select the winner (it's random if there are a few topPlayers)
-      Player winner = topPlayers.isEmpty() ? null
-          : topPlayers.get(random.nextInt(topPlayers.size()));
+        for (Player p : room.getPlayers()) {
+          boolean isWinner = winner != null && p.getId().equals(winner.getId());
+          p.setIsWinner(isWinner);
+        }
 
-      for (Player p : room.getPlayers()) {
-        boolean isWinner = winner != null && p.getId().equals(winner.getId());
-        p.setIsWinner(isWinner);
+        gameDbService.saveFinalResultsToDb(room);
+        finishGame(room);
       }
-
-      gameDbService.saveFinalResultsToDb(room);
-      finishGame(room);
     }
   }
 
@@ -226,5 +229,4 @@ public class GameRoundService {
     }
     if (shouldFinishRound) { getRoundResults(room); }
   }
-
 }
