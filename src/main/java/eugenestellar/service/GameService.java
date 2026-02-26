@@ -29,7 +29,7 @@ public class GameService {
   private final GameRoundService gameRoundService;
   private final QuestionService questionService;
   private final GameDbService gameDbService;
-  private final GameRoomManager gameRoomManager;
+  private final GameRoomManagerService gameRoomManager;
   private final GameNotificationService notificationService;
 
   private final Random random = new Random();
@@ -40,7 +40,7 @@ public class GameService {
                      TaskScheduler taskScheduler,
                      GameRoundService gameRoundService,
                      GameDbService gameDbService,
-                     GameRoomManager gameRoomManager) {
+                     GameRoomManagerService gameRoomManager) {
     this.notificationService = notificationService;
     this.taskScheduler = taskScheduler;
     this.gameDbService = gameDbService;
