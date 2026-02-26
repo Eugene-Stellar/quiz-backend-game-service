@@ -1,18 +1,13 @@
 package eugenestellar.service;
 
-import eugenestellar.exception.ws.FrontendException;
 import eugenestellar.model.GameStatus;
 import eugenestellar.model.PlayerStatus;
 import eugenestellar.model.dto.GameRoomResponse;
-import eugenestellar.model.entity.*;
-import eugenestellar.model.dto.AnswerDto;
 import eugenestellar.model.gameEntity.GameRoom;
 import eugenestellar.model.gameEntity.Player;
-import eugenestellar.repository.QuestionRepo;
 import eugenestellar.model.dto.mapper.GameMapper;
 
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.task.TaskRejectedException;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.stereotype.Service;
@@ -23,12 +18,12 @@ import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ScheduledFuture;
 
-// TODO: установить время для соединения (удалять через 1-2 часа), то есть рвать соединение
 @Slf4j
 @Service
 public class GameService {
 
   private static final int WAITING_COUNTDOWN_TIME = 5;
+  private static final int ROOM_DELETION_TIME = 30;
   public static final int MAX_PLAYERS = 4;
 
   private final GameRoundService gameRoundService;
@@ -39,7 +34,6 @@ public class GameService {
 
   private final Random random = new Random();
   private final TaskScheduler taskScheduler;
-
 
   public GameService(GameNotificationService notificationService,
                      QuestionService questionService,
@@ -55,19 +49,18 @@ public class GameService {
     this.questionService = questionService;
   }
 
-
-  // метод для получения статуса игрока, чтобы понять переводить его в меню или в игру закидывать // todo: можно в отдельный класс закинуть
   public String getPlayerState(Long userId) {
     Optional<GameRoom> gameRoomOpt = gameRoomManager.findGameRoomByPlayerId(userId);
     if (gameRoomOpt.isEmpty()) {
       return PlayerStatus.NOT_IN_GAME.toString();
     }
 
-    if (gameRoomOpt.get().getStatus() == GameStatus.FINISHED) {
+    GameRoom room = gameRoomOpt.get();
+    if (room.getStatus() == GameStatus.FINISHED) {
       return PlayerStatus.NOT_IN_GAME.toString();
     }
 
-    for (Player player : gameRoomOpt.get().getPlayers()) {
+    for (Player player : room.getPlayers()) {
       if (player.getId().equals(userId)) {
         return player.getStatus().toString();
       }
@@ -76,10 +69,10 @@ public class GameService {
     return PlayerStatus.NOT_IN_GAME.toString();
   }
 
-  public synchronized GameRoomResponse joinGameRoom(String username, Long userId, String qTopic, int qQuantity) {
+  public GameRoomResponse joinGameRoom(String username, Long userId, String qTopic, int qQuantity) {
     // checking whether any room contains user or not,
-    // if yes then reconnect happens i.e. return the user in that room and change its status on CONNECTED.
-    // if user does not belong any room, then user is placed in available room with
+    // if yes, then reconnect happens i.e. return the user in that room and change its status on CONNECTED.
+    // if no, then user is placed in available room with corresponding topic and question quantity
 
     if (!"random".equals(qTopic))
       questionService.validateTopic(qTopic);
@@ -88,10 +81,12 @@ public class GameService {
     Optional<GameRoom> existingGameRoomOpt = gameRoomManager.findGameRoomByPlayerId(userId);
     if (existingGameRoomOpt.isPresent()) {
       targetRoom = existingGameRoomOpt.get();
-      for (Player p : targetRoom.getPlayers()) {
-        if (p.getId().equals(userId)) {
-          p.setStatus(PlayerStatus.CONNECTED);
-          break;
+      synchronized (targetRoom) {
+        for (Player p : targetRoom.getPlayers()) {
+          if (p.getId().equals(userId)) {
+            p.setStatus(PlayerStatus.CONNECTED);
+            break;
+          }
         }
       }
 
@@ -113,45 +108,52 @@ public class GameService {
   }
 
   private GameRoomResponse processPlayerJoin(GameRoom targetRoom, String username, Long userId) {
+    String roomId = targetRoom.getId();
+    String gameTopic = "/topic/game_room/" + roomId;
 
-    Player playerToRoom = Player.builder()
-        .username(username)
-        .id(userId)
-        .status(PlayerStatus.CONNECTED)
-        .score(0)
-        .isAnswered(false)
-        .build();
-    targetRoom.getPlayers().add(playerToRoom);
+    synchronized (targetRoom) {
+      if (targetRoom.getPlayers().size() >= MAX_PLAYERS) {
+        return joinGameRoom(username, userId, targetRoom.getTopic(), targetRoom.getQQuantity());
+      }
 
-    long connectedPlayersCount = targetRoom.getPlayers().stream()
-        .filter(p -> p.getStatus() == PlayerStatus.CONNECTED)
-        .count();
+      Player playerToRoom = Player.builder()
+          .username(username)
+          .id(userId)
+          .status(PlayerStatus.CONNECTED)
+          .score(0)
+          .isAnswered(false)
+          .build();
+      targetRoom.getPlayers().add(playerToRoom);
 
-    // 2 connected players -> start timer
-    if (connectedPlayersCount >= 2 && targetRoom.getStatus() == GameStatus.WAITING) {
-      targetRoom.setStatus(GameStatus.COUNTDOWN);
+      long connectedPlayersCount = targetRoom.getPlayers().stream()
+          .filter(p -> p.getStatus() == PlayerStatus.CONNECTED)
+          .count();
 
-      Instant endTimeInst = ZonedDateTime.now().plusSeconds(WAITING_COUNTDOWN_TIME).toInstant();
-      Date endTime = Date.from(endTimeInst);
-      targetRoom.setCountdownEndTime(endTime);
+      // 2 connected players -> start timer
+      if (connectedPlayersCount >= 2 && targetRoom.getStatus() == GameStatus.WAITING) {
+        targetRoom.setStatus(GameStatus.COUNTDOWN);
 
-      // schedule timer deletion
-      ScheduledFuture<?> timerTask = taskScheduler
-          .schedule(() -> expireWaitingCountdown(targetRoom), endTimeInst);
+        Instant endTimeInst = ZonedDateTime.now().plusSeconds(WAITING_COUNTDOWN_TIME).toInstant();
+        Date endTime = Date.from(endTimeInst);
+        targetRoom.setCountdownEndTime(endTime);
 
-      gameRoomManager.addTimer(targetRoom.getId(), timerTask);
-    }
+        // schedule timer deletion
+        ScheduledFuture<?> timerTask = taskScheduler
+            .schedule(() -> expireWaitingCountdown(targetRoom), endTimeInst);
 
-    String gameTopic = "/topic/game_room/" + targetRoom.getId();
-    // 4 connected players -> countdown finished & start game
-    if (connectedPlayersCount == MAX_PLAYERS) {
-      gameRoomManager.removeTimer(targetRoom.getId());
-      targetRoom.setCountdownEndTime(null);
+        gameRoomManager.addTimer(roomId, timerTask);
+      }
 
-      // start game & send the 1st question
-      gameRoundService.startGameAndPropagateQuestions(targetRoom);
+      // 4 connected players -> countdown finished & start game
+      if (connectedPlayersCount == MAX_PLAYERS) {
+        gameRoomManager.removeTimer(roomId);
+        targetRoom.setCountdownEndTime(null);
 
-      return new GameRoomResponse(gameTopic, GameMapper.toDto(targetRoom));
+        // start game & send the 1st question
+        gameRoundService.startGameAndPropagateQuestions(targetRoom);
+
+        return new GameRoomResponse(gameTopic, GameMapper.toDto(targetRoom));
+      }
     }
 
     // sending to all players an updated list of players
@@ -170,7 +172,7 @@ public class GameService {
   }
 
   // creating a brand new GameRoom
-  private synchronized GameRoomResponse createRoom(String username, Long userId, Integer qQuantity, String qTopic) {
+  private GameRoomResponse createRoom(String username, Long userId, Integer qQuantity, String qTopic) {
     if (qTopic.equals("random")) {
       List<String> topics = questionService.findAllTopics();
       qTopic = topics.get(random.nextInt(topics.size()));
@@ -199,57 +201,52 @@ public class GameService {
     return processPlayerJoin(newRoom, username, userId);
   }
 
-
   // DELETE user from game room
-  public synchronized void leaveGameRoom(Long userId, String roomId) {
+  public void leaveGameRoom(Long userId, String roomId) {
 
     GameRoom room = gameRoomManager.getRoom(roomId);
     if (room == null) {return;}
 
-    // FIXME: надо ли это уловие вообще, если комната закончена и игрок уходит, тогда я выгоняю
-    //  его из комнаты, какой смысл если комната и так удаляется когда игра заканчивается
-    //  пользователь даже не сможет по логике выйти из игры если она закончена
-    if (room.getStatus() == GameStatus.FINISHED) {
-      room.getPlayers().removeIf(player -> player.getId().equals(userId));
-      return;
-    }
-    // delete player from room
-    room.getPlayers().removeIf(player -> player.getId().equals(userId));
-
-    // TECHNICAL WIN if one player is remained in active room
-    if (room.getPlayers().size() == 1 && (room.getStatus() == GameStatus.ACTIVE || room.getStatus() == GameStatus.ROUND_FINISHED)) {
-      Player winner = room.getPlayers().getFirst();
-      winner.setIsWinner(true);
-
-      gameDbService.technicalWin(winner, room);
-      gameRoundService.finishGame(room);
-      return;
-    }
-
-    // delete room if it's empty
-    if (room.getPlayers().isEmpty()) {
-      // remove timers if it has status COUNTDOWN // TODO: по идее я должен в любом случае удалять таймеры на всякий случай
-      if (room.getStatus() == GameStatus.COUNTDOWN) {
-        gameRoomManager.removeTimer(roomId);
+    synchronized (room) {
+      // in the case if player started new game and still hangs in finished room which will be deleted in 3 seconds
+      if (room.getStatus() == GameStatus.FINISHED) {
+        return;
       }
-      gameRoomManager.removeRoom(roomId);
-      return;
-    }
-    // change status of room if there's 1 player and
-    // status of the room is COUNTDOWN // TODO: возможно порядок условий надо поменять
-    if (room.getPlayers().size() < 2 &&
-        room.getStatus() == GameStatus.COUNTDOWN) {
-      gameRoomManager.removeTimer(roomId);
-      room.setCountdownEndTime(null);
-      room.setStatus(GameStatus.WAITING);
+
+      // delete player from room
+      room.getPlayers().removeIf(player -> player.getId().equals(userId));
+
+      // TECHNICAL WIN if one player is remained in active room
+      if (room.getPlayers().size() == 1 && (room.getStatus() == GameStatus.ACTIVE || room.getStatus() == GameStatus.ROUND_FINISHED)) {
+        Player winner = room.getPlayers().getFirst();
+        winner.setIsWinner(true);
+
+        gameDbService.technicalWin(winner, room);
+        gameRoundService.finishGame(room);
+        return;
+      }
+
+      // delete room if it's empty
+      if (room.getPlayers().isEmpty()) {
+        gameRoomManager.removeRoom(roomId);
+        return;
+      }
+      // change status of room if there's 1 player and
+      // status of the room is COUNTDOWN
+      if (room.getPlayers().size() < 2 &&
+          room.getStatus() == GameStatus.COUNTDOWN) {
+        gameRoomManager.removeTimer(roomId);
+        room.setCountdownEndTime(null);
+        room.setStatus(GameStatus.WAITING);
+      }
     }
     notificationService.sendUpdatedRoom(room);
   }
 
-  private void deleteRoomIfAllDisconnected(String roomId) {
-    GameRoom room = gameRoomManager.getRoom(roomId);
+  private void deleteRoomIfAllDisconnected(GameRoom room) {
     if (room == null) { return; } // if already deleted
 
+    String roomId = room.getId();
     boolean hasConnectedPlayer = room.getPlayers().stream()
         .anyMatch(player -> player.getStatus() == PlayerStatus.CONNECTED);
 
@@ -257,73 +254,67 @@ public class GameService {
     // all users are disconnected then room and timer are deleted
     if (!hasConnectedPlayer) {
       gameRoomManager.removeRoom(roomId);
-      gameRoomManager.removeTimer(roomId); // todo это наверное лишнее если я удаляю таймер в мэнеджере
       log.info("GameRoom {} deleted due to inactivity", roomId);
     }
-    // TODO: тут мб return надо сделать на случай если законекченные есть но мб это по дефолту и так
   }
 
   // case of disconnection (i.e. closed a tab or browser)
-  public synchronized void disconnectGameRoom(Long userId) {
+  public void disconnectGameRoom(Long userId) {
     Optional<GameRoom> roomOpt = gameRoomManager.findGameRoomByPlayerId(userId);
 
     if (roomOpt.isPresent()) {
       GameRoom room = roomOpt.get();
-
-      // delete player form room if it's finished // TODO: не уверен что это надо потому что комната и так удалиться по идее я могу это вообще удалить потому что это ниже по сути прописано тоже самое
-      if (room.getStatus() == GameStatus.FINISHED) {
-        room.getPlayers().removeIf(p -> p.getId().equals(userId));
-        if (room.getPlayers().isEmpty()) {
-          gameRoomManager.removeRoom(room.getId());
-        }
-        return;
-      }
-
-      Player targetPlayer = null;
-      for (Player p : room.getPlayers()) {
-        if (p.getId().equals(userId)) {
-          targetPlayer = p;
-        }
-      }
-      if (targetPlayer == null) {return;}
-
-      // change player status if user's disconnected from active room
-      if (room.getStatus() == GameStatus.ACTIVE || room.getStatus() == GameStatus.ROUND_FINISHED) {
-        targetPlayer.setStatus(PlayerStatus.DISCONNECTED);
-      } else { // if room status COUNTDOWN or WAITING then player is removed
-        room.getPlayers().remove(targetPlayer);
-        // if room is empty then delete it // todo: удалить выше дублируется логика if FINISHED
-        if (room.getPlayers().isEmpty()) {
-          String roomId = room.getId();
-          gameRoomManager.removeTimer(room.getId());  // todo это наверное лишнее если я удаляю таймер в мэнеджере
-          gameRoomManager.removeRoom(roomId);
-        }
-      }
-
-      long connectedPlayersCount = room.getPlayers().stream()
-          .filter(player -> player.getStatus() == PlayerStatus.CONNECTED)
-          .count();
-
-      // if there's only one player and RoomStatus is COUNTDOWN then status changes to WAITING and remove timer
       String roomId = room.getId();
-      if (connectedPlayersCount < 2 && room.getStatus() == GameStatus.COUNTDOWN) {
-        gameRoomManager.removeTimer(roomId);
-        room.setCountdownEndTime(null);
-        room.setStatus(GameStatus.WAITING);
-      }
 
-      // if everyone in GameRoom has status DISCONNECTED -> room is deleted in 30 seconds if no one is connected
-      if (connectedPlayersCount == 0 && room.getStatus() == GameStatus.ACTIVE) {
-        Instant deleteTime = ZonedDateTime.now().plusSeconds(30).toInstant();
-        try {
-          taskScheduler.schedule(() -> deleteRoomIfAllDisconnected(roomId), deleteTime);
-        } catch (TaskRejectedException e) {
-          log.debug("Server is shutting down, scheduled deletion of the room {} cancelled", roomId);
+      synchronized (room) {
+        // return, because room will be deleted anyway, since it's finished
+        if (room.getStatus() == GameStatus.FINISHED) {
+          return;
+        }
+
+        Player targetPlayer = null;
+        for (Player p : room.getPlayers()) {
+          if (p.getId().equals(userId)) {
+            targetPlayer = p;
+          }
+        }
+        if (targetPlayer == null) {return;}
+
+        // change player status if user's disconnected from active room
+        if (room.getStatus() == GameStatus.ACTIVE || room.getStatus() == GameStatus.ROUND_FINISHED) {
+          targetPlayer.setStatus(PlayerStatus.DISCONNECTED);
+        } else { // if room status COUNTDOWN or WAITING then player is removed
+          room.getPlayers().remove(targetPlayer);
+          // if room is empty then delete it
+          if (room.getPlayers().isEmpty()) {
+            gameRoomManager.removeRoom(roomId);
+            return;
+          }
+        }
+
+        long connectedPlayersCount = room.getPlayers().stream()
+            .filter(player -> player.getStatus() == PlayerStatus.CONNECTED)
+            .count();
+
+        // if there's only one player and RoomStatus is COUNTDOWN then status changes to WAITING and remove timer
+        if (connectedPlayersCount < 2 && room.getStatus() == GameStatus.COUNTDOWN) {
+          gameRoomManager.removeTimer(roomId);
+          room.setCountdownEndTime(null);
+          room.setStatus(GameStatus.WAITING);
+        }
+
+        // if everyone in GameRoom has status DISCONNECTED -> room is deleted in 30 seconds if no one is connected
+        if (connectedPlayersCount == 0 && (room.getStatus() == GameStatus.ACTIVE ||
+            room.getStatus() == GameStatus.ROUND_FINISHED)) {
+          Instant deleteTime = ZonedDateTime.now().plusSeconds(ROOM_DELETION_TIME).toInstant();
+          try {
+            taskScheduler.schedule(() -> deleteRoomIfAllDisconnected(room), deleteTime);
+          } catch (TaskRejectedException e) {
+            log.info("Server is shutting down, scheduled deletion of the room {} cancelled", roomId);
+          }
         }
       }
       notificationService.sendUpdatedRoom(room);
     }
-    // TODO: тут мб return надо сделать на случай если законекченные есть но мб это по дефолту и так в воид методе
   }
-
 }
