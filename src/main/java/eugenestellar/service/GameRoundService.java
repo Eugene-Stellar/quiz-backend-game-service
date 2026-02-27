@@ -13,10 +13,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.time.ZonedDateTime;
-import java.util.ArrayList;
-import java.util.Date;
-import java.util.List;
-import java.util.Random;
+import java.util.*;
 import java.util.concurrent.ScheduledFuture;
 
 @Service
@@ -189,10 +186,12 @@ public class GameRoundService {
     boolean shouldFinishRound = false;
 
     synchronized (room) {
-      Player currentPlayer = room.getPlayers().stream()
+      Optional<Player> currentPlayerOpt = room.getPlayers().stream()
           .filter(p -> p.getId().equals(userId))
-          .findFirst()
-          .orElseThrow(() -> new RuntimeException("Player with id: " + userId + " not found in room"));
+          .findFirst();
+
+      if (currentPlayerOpt.isEmpty()) {return;}
+      Player currentPlayer = currentPlayerOpt.get();
 
       if (currentPlayer.getIsAnswered()) return;
 
