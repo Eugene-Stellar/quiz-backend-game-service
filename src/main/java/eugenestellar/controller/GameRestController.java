@@ -1,6 +1,7 @@
 package eugenestellar.controller;
 
 import eugenestellar.config.UserPrincipal;
+import eugenestellar.service.GameRoomManagerService;
 import eugenestellar.service.GameService;
 import eugenestellar.service.QuestionService;
 import org.springframework.http.ResponseEntity;
@@ -18,10 +19,14 @@ public class GameRestController {
 
   private final GameService gameService;
   private final QuestionService questionService;
+  private final GameRoomManagerService gameRoomManager;
 
-  public GameRestController(GameService gameService, QuestionService questionService) {
+  public GameRestController(GameService gameService,
+                            QuestionService questionService,
+                            GameRoomManagerService gameRoomManager) {
     this.gameService = gameService;
     this.questionService = questionService;
+    this.gameRoomManager = gameRoomManager;
   }
 
   @GetMapping("/my_status")
@@ -38,5 +43,13 @@ public class GameRestController {
     topics.add("random");
 
     return ResponseEntity.ok().body(topics);
+  }
+
+  @GetMapping("/rooms")
+  public ResponseEntity<Map<String, Long>> getRoomQuantity() {
+
+    long roomQuantity = gameRoomManager.getRoomQuantity();
+
+    return ResponseEntity.ok().body(Map.of("roomQuantity", roomQuantity));
   }
 }

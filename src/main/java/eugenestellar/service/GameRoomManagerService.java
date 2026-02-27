@@ -22,6 +22,10 @@ public class GameRoomManagerService {
   private final Map<String, GameRoom> gameRooms = new ConcurrentHashMap<>();
   private final Map<String, ScheduledFuture<?>> timers = new ConcurrentHashMap<>();
 
+  public long getRoomQuantity() {
+    return gameRooms.size();
+  }
+
   public void addRoom (GameRoom room) {
     gameRooms.put(room.getId(), room);
   }

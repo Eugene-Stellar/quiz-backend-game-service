@@ -31,7 +31,7 @@ public class CustomSecurityConfig {
         .csrf(csrf -> csrf.disable())
         .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
         .authorizeHttpRequests(auth -> auth
-          .requestMatchers("/error", "/ws-game/**").permitAll()
+          .requestMatchers("/error", "/ws-game/**","/api/game/rooms").permitAll()
           .requestMatchers("/user_info/**").hasRole("AUTH_SERVICE")
           .requestMatchers("/api/**").hasRole("USER")
           .anyRequest().authenticated())
