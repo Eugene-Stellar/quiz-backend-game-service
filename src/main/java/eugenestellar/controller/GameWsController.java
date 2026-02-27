@@ -33,12 +33,20 @@ public class GameWsController {
       @Max(value = 15, message = "Maximum 15 questions")
       @DestinationVariable Integer qQuantity,
       @DestinationVariable String topic,
-      @Header("simpSessionAttributes") Map<String, Object> attributes ) {
+      @Header("simpSessionAttributes") Map<String, Object> attributes) {
 
     String username = (String) attributes.get("username");
     Long userId = (Long) attributes.get("userId");
 
     return gameService.joinGameRoom(username, userId, topic, qQuantity);
+  }
+
+  @MessageMapping("/reconnect")
+  @SendToUser("/queue/reply")
+  public Object reconnect(@Header("simpSessionAttributes") Map<String, Object> attributes) {
+    Long userId = (Long) attributes.get("userId");
+
+    return gameService.reconnectUser(userId);
   }
 
   @MessageMapping("/answer/{qId}/{answerId}/{roomId}")
