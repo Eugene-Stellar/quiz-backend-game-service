@@ -1,5 +1,6 @@
 package eugenestellar.service;
 
+import eugenestellar.exception.ws.FrontendException;
 import eugenestellar.model.GameStatus;
 import eugenestellar.model.PlayerStatus;
 import eugenestellar.model.dto.GameRoomResponse;
@@ -76,8 +77,25 @@ public class GameService {
 
     if (!"random".equals(qTopic))
       questionService.validateTopic(qTopic);
-    GameRoom targetRoom;
     // RECONNECT
+    Optional<GameRoom> existingGameRoomOpt = gameRoomManager.findGameRoomByPlayerId(userId);
+    if (existingGameRoomOpt.isPresent()) {
+      return reconnectUser(userId);
+    }
+    /* JOIN AVAILABLE ROOM */
+    GameRoom targetRoom;
+    Optional<GameRoom> optionalGameRoom = gameRoomManager.findAvailableGameRoom(qTopic, qQuantity);
+    if (optionalGameRoom.isPresent()) {
+      targetRoom = optionalGameRoom.get();
+    } else {
+      return createRoom(username, userId, qQuantity, qTopic);
+    }
+    return processPlayerJoin(targetRoom, username, userId);
+  }
+
+  // RECONNECT
+  public GameRoomResponse reconnectUser(Long userId) {
+    GameRoom targetRoom;
     Optional<GameRoom> existingGameRoomOpt = gameRoomManager.findGameRoomByPlayerId(userId);
     if (existingGameRoomOpt.isPresent()) {
       targetRoom = existingGameRoomOpt.get();
@@ -97,14 +115,7 @@ public class GameService {
       // return topic (of this room) to this user and the list of players in the room
       return new GameRoomResponse(gameTopic, GameMapper.toDto(targetRoom));
     }
-    /* JOIN AVAILABLE ROOM */
-    Optional<GameRoom> optionalGameRoom = gameRoomManager.findAvailableGameRoom(qTopic, qQuantity);
-    if (optionalGameRoom.isPresent()) {
-      targetRoom = optionalGameRoom.get();
-    } else {
-      return createRoom(username, userId, qQuantity, qTopic);
-    }
-    return processPlayerJoin(targetRoom, username, userId);
+    throw new FrontendException("Active room not found during reconnection");
   }
 
   private GameRoomResponse processPlayerJoin(GameRoom targetRoom, String username, Long userId) {
