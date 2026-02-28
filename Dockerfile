@@ -1,6 +1,6 @@
 # STAGE 1: Build the app
-# Maven image with Java 17
-FROM maven:3.9-eclipse-temurin-17-noble AS build
+# Maven image with Java 21
+FROM maven:3.9-eclipse-temurin-21-noble AS build
 
 # Set working directory
 WORKDIR /app
