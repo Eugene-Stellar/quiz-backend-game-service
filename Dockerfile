@@ -16,8 +16,8 @@ COPY src ./src
 RUN mvn clean package -DskipTests
 
 # STAGE 2: Run the app
-# Use minimal Java 17 runtime
-FROM eclipse-temurin:17-jre-focal
+# Use minimal Java 21 runtime
+FROM eclipse-temurin:21-jre
 
 WORKDIR /app
 
